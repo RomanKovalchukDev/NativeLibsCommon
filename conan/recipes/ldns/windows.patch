@@ -1,27 +1,53 @@
-Index: util.c
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
---- util.c	(revision 53bc57512c19b11eebc403a4cb2bbf7295eb0db1)
-+++ util.c	(date 1584719903137)
-@@ -18,7 +18,9 @@
- #include <strings.h>
- #include <stdlib.h>
- #include <stdio.h>
+From e51a78a94beb44504f5895bbfefb19a5866d5968 Mon Sep 17 00:00:00 2001
+From: Roman Kovalchuk <romankovalchuk@nerdzlab.com>
+Date: Thu, 28 Aug 2025 15:59:07 +0300
+Subject: [PATCH] Added checks for not defined windows module
+
+---
+ host2str.c      | 2 ++
+ ldns/packet.h   | 3 +++
+ ldns/resolver.h | 3 +++
+ net.c           | 2 ++
+ util.c          | 2 ++
+ 5 files changed, 12 insertions(+)
+
+diff --git a/host2str.c b/host2str.c
+index deeeaf63..b22d7981 100644
+--- a/host2str.c
++++ b/host2str.c
+@@ -26,7 +26,9 @@
+ #include <netdb.h>
+ #endif
+ #include <time.h>
 +#ifndef _MSC_VER
  #include <sys/time.h>
 +#endif
- #include <time.h>
- #include <ctype.h>
  
-Index: ldns/resolver.h
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
---- ldns/resolver.h	(revision 53bc57512c19b11eebc403a4cb2bbf7295eb0db1)
-+++ ldns/resolver.h	(date 1584718953801)
+ #ifdef HAVE_SSL
+ #include <openssl/bn.h>
+diff --git a/ldns/packet.h b/ldns/packet.h
+index 2c60609f..62244228 100644
+--- a/ldns/packet.h
++++ b/ldns/packet.h
+@@ -32,11 +32,14 @@
+ #define LDNS_RA		32      /* Recursion Available - server flag */
+ #define LDNS_AD		64      /* Authenticated Data - server flag */
+ 
++#include <ldns/config.h>
+ #include <ldns/error.h>
+ #include <ldns/common.h>
+ #include <ldns/rr.h>
+ #include <ldns/edns.h>
++#ifndef _MSC_VER
+ #include <sys/time.h>
++#endif
+ 
+ #ifdef __cplusplus
+ extern "C" {
+diff --git a/ldns/resolver.h b/ldns/resolver.h
+index e8459db7..642be84c 100644
+--- a/ldns/resolver.h
++++ b/ldns/resolver.h
 @@ -20,13 +20,16 @@
  #ifndef LDNS_RESOLVER_H
  #define LDNS_RESOLVER_H
@@ -39,13 +65,10 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
  
  #ifdef __cplusplus
  extern "C" {
-Index: net.c
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
---- net.c	(revision 53bc57512c19b11eebc403a4cb2bbf7295eb0db1)
-+++ net.c	(date 1581415335811)
+diff --git a/net.c b/net.c
+index 8fc9c8c4..e742e81d 100644
+--- a/net.c
++++ b/net.c
 @@ -27,7 +27,9 @@
  #ifdef HAVE_ARPA_INET_H
  #include <arpa/inet.h>
@@ -56,41 +79,20 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
  #include <errno.h>
  #include <fcntl.h>
  #ifdef HAVE_POLL
-Index: ldns/packet.h
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
---- ldns/packet.h	(revision 53bc57512c19b11eebc403a4cb2bbf7295eb0db1)
-+++ ldns/packet.h	(date 1584718969611)
-@@ -32,10 +32,13 @@
- #define LDNS_RA		32      /* Recursion Available - server flag */
- #define LDNS_AD		64      /* Authenticated Data - server flag */
- 
-+#include <ldns/config.h>
- #include <ldns/error.h>
- #include <ldns/common.h>
- #include <ldns/rr.h>
+diff --git a/util.c b/util.c
+index 662aa23a..73ad4b74 100644
+--- a/util.c
++++ b/util.c
+@@ -18,7 +18,9 @@
+ #include <strings.h>
+ #include <stdlib.h>
+ #include <stdio.h>
 +#ifndef _MSC_VER
  #include <sys/time.h>
 +#endif
- 
- #ifdef __cplusplus
- extern "C" {
-Index: host2str.c
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
---- host2str.c	(revision 53bc57512c19b11eebc403a4cb2bbf7295eb0db1)
-+++ host2str.c	(date 1584720299830)
-@@ -26,7 +26,9 @@
- #include <netdb.h>
- #endif
  #include <time.h>
-+#ifndef _MSC_VER
- #include <sys/time.h>
-+#endif
+ #include <ctype.h>
  
- #ifdef HAVE_SSL
- #include <openssl/bn.h>
+-- 
+2.39.5 (Apple Git-154)
+
