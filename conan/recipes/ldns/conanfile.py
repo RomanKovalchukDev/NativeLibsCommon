@@ -18,7 +18,7 @@ class LdnsConan(ConanFile):
 
     def source(self):
         self.run("git clone https://github.com/NLnetLabs/ldns.git")
-        self.run("cd ldns && git checkout 7128ef56649e0737f236bc5d5d640de38ff0036d")
+        self.run("cd ldns && git checkout 0038f8e5d2f73dbfd6ec657ec6ea52f08bc90ebf")
         patch(self, base_path="ldns", patch_file="windows.patch")
 
     def layout(self):
