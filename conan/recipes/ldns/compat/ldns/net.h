@@ -13,8 +13,6 @@
 #ifndef LDNS_NET_H
 #define LDNS_NET_H
 
-#include <ldns/config.h>
-
 #include <ldns/ldns.h>
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -39,7 +37,7 @@ extern "C" {
  */
 
 /**
- * Sends a buffer to an ip using udp and return the respons as a ldns_pkt
+ * Sends a buffer to an ip using udp and return the response as a ldns_pkt
  * \param[in] qbin the ldns_buffer to be send
  * \param[in] to the ip addr to send to
  * \param[in] tolen length of the ip addr
@@ -99,14 +97,13 @@ int ldns_tcp_bgsend2(ldns_buffer *qbin, const struct sockaddr_storage *to, sockl
 int ldns_tcp_bgsend(ldns_buffer *qbin, const struct sockaddr_storage *to, socklen_t tolen, struct timeval timeout);
 
 /**
- * Sends a buffer to an ip using tcp and return the respons as a ldns_pkt
- * \param[in] qbin the ldns_buffer to be send
+ * Sends a buffer to an ip using tcp and return the response as a ldns_pkt
+ * \param[out] result packet with the answer
  * \param[in] qbin the ldns_buffer to be send
  * \param[in] to the ip addr to send to
  * \param[in] tolen length of the ip addr
  * \param[in] timeout the timeout value for the network
  * \param[out] answersize size of the packet
- * \param[out] result packet with the answer
  * \return status
  */
 ldns_status ldns_tcp_send(uint8_t **result, ldns_buffer *qbin, const struct sockaddr_storage *to, socklen_t tolen, struct timeval timeout, size_t *answersize);
@@ -114,9 +111,9 @@ ldns_status ldns_tcp_send(uint8_t **result, ldns_buffer *qbin, const struct sock
 /**
  * Sends ptk to the nameserver at the resolver object. Returns the data
  * as a ldns_pkt
- * 
+ *
  * \param[out] pkt packet received from the nameserver
- * \param[in] r the resolver to use 
+ * \param[in] r the resolver to use
  * \param[in] query_pkt the query to send
  * \return status
  */
@@ -125,9 +122,9 @@ ldns_status ldns_send(ldns_pkt **pkt, ldns_resolver *r, const ldns_pkt *query_pk
 /**
  * Sends and ldns_buffer (presumably containing a packet to the nameserver at the resolver object. Returns the data
  * as a ldns_pkt
- * 
+ *
  * \param[out] pkt packet received from the nameserver
- * \param[in] r the resolver to use 
+ * \param[in] r the resolver to use
  * \param[in] qb the buffer to send
  * \param[in] tsig_mac the tsig MAC to authenticate the response with (NULL to do no TSIG authentication)
  * \return status
@@ -242,7 +239,7 @@ struct sockaddr_storage * ldns_rdf2native_sockaddr_storage(const ldns_rdf *rd, u
  * returns an rdf with the sockaddr info. works for ip4 and ip6
  * \param[in] sock the struct sockaddr_storage to convert
  * \param[in] port what port was used. When NULL this is not set
- * \return ldns_rdf* wth the address
+ * \return ldns_rdf* with the address
  */
 ldns_rdf * ldns_sockaddr_storage2rdf(const struct sockaddr_storage *sock, uint16_t *port);
 
@@ -250,7 +247,7 @@ ldns_rdf * ldns_sockaddr_storage2rdf(const struct sockaddr_storage *sock, uint16
  * Prepares the resolver for an axfr query
  * The query is sent and the answers can be read with ldns_axfr_next
  * \param[in] resolver the resolver to use
- * \param[in] domain the domain to exfr
+ * \param[in] domain the domain to axfr
  * \param[in] c the class to use
  * \return ldns_status the status of the transfer
  */

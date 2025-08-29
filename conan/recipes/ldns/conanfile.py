@@ -38,6 +38,7 @@ class LdnsConan(ConanFile):
     def package(self):
         copy(self, "*.h", src=join(self.source_folder, "ldns/ldns"), dst=join(self.package_folder, "include/ldns"), keep_path = True)
         copy(self, "*.h", src=join(self.source_folder, "compat/ldns"), dst=join(self.package_folder, "include/ldns"), keep_path = True)
+        copy(self, "*.in", src=join(self.source_folder, "compat/ldns"), dst=join(self.package_folder, "include/ldns"), keep_path = True)
         copy(self, "*.dll", src=self.build_folder, dst=join(self.package_folder, "bin"), keep_path=False)
         copy(self, "*.lib", src=self.build_folder, dst=join(self.package_folder, "lib"), keep_path=False)
         copy(self, "*.so", src=self.build_folder, dst=join(self.package_folder, "lib"), keep_path=False)
