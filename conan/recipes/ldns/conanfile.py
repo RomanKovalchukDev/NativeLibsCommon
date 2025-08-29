@@ -5,7 +5,7 @@ from os.path import join
 
 class LdnsConan(ConanFile):
     name = "ldns"
-    version = "2021-03-29"
+    version = "2024-06-20"
     settings = "os", "compiler", "build_type", "arch"
     options = {"shared": [True, False], "fPIC": [True, False]}
     default_options = {"shared": False, "fPIC": True}
