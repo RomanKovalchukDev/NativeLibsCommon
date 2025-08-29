@@ -8,31 +8,37 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
 add_library(ldns STATIC
-        ldns/packet.c
-        ldns/rr.c
-        ldns/parse.c
         ldns/buffer.c
+        ldns/dane.c
         ldns/dname.c
-        ldns/util.c
-        ldns/dnssec.c
         ldns/dnssec_sign.c
         ldns/dnssec_verify.c
         ldns/dnssec_zone.c
-        ldns/keys.c
+        ldns/dnssec.c
+        ldns/duration.c
+        ldns/edns.c
         ldns/error.c
+        ldns/higher.c
         ldns/host2str.c
-        ldns/str2host.c
-        ldns/compat/b64_ntop.c
-        ldns/compat/b64_pton.c
-        ldns/rdata.c
-        ldns/rbtree.c
         ldns/host2wire.c
-        ldns/wire2host.c
+        ldns/keys.c
+        ldns/linktest.c
+        ldns/net.c
+        ldns/packet.c
+        ldns/parse.c
+        ldns/radix.c
+        ldns/rbtree.c
+        ldns/rdata.c
         ldns/resolver.c
         ldns/rr_functions.c
-        ldns/net.c
+        ldns/rr.c
         ldns/sha1.c
         ldns/sha2.c
+        ldns/str2host.c
+        ldns/tsig.c
+        ldns/update.c
+        ldns/util.c
+        ldns/wire2host.c
         ldns/zone.c)
 
 target_include_directories(ldns PUBLIC ldns)
