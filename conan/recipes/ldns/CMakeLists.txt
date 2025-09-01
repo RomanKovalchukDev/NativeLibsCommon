@@ -39,7 +39,9 @@ add_library(ldns STATIC
         ldns/update.c
         ldns/util.c
         ldns/wire2host.c
-        ldns/zone.c)
+        ldns/zone.c
+        ldns/compat/b64_ntop.c
+        ldns/compat/b64_pton.c)
 
 target_include_directories(ldns PUBLIC ldns)
 target_include_directories(ldns PUBLIC compat)
