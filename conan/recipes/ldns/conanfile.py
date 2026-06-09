@@ -5,7 +5,7 @@ from os.path import join
 
 class LdnsConan(ConanFile):
     name = "ldns"
-    version = "2021-03-29"
+    version = "2024-06-20"
     settings = "os", "compiler", "build_type", "arch"
     options = {"shared": [True, False], "fPIC": [True, False]}
     default_options = {"shared": False, "fPIC": True}
@@ -18,8 +18,9 @@ class LdnsConan(ConanFile):
 
     def source(self):
         self.run("git clone https://github.com/NLnetLabs/ldns.git")
-        self.run("cd ldns && git checkout 7128ef56649e0737f236bc5d5d640de38ff0036d")
+        self.run("cd ldns && git checkout 0038f8e5d2f73dbfd6ec657ec6ea52f08bc90ebf")
         patch(self, base_path="ldns", patch_file="windows.patch")
+        patch(self, base_path="ldns", patch_file="cira-codes.patch")
 
     def layout(self):
         cmake_layout(self)

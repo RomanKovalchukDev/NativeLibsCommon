@@ -10,8 +10,8 @@ class NativeLibsCommon(ConanFile):
     name = "native_libs_common"
     license = "Apache-2.0"
     author = "AdguardTeam"
-    url = "https://github.com/AdguardTeam/NativeLibsCommon"
-    vcs_url = "https://github.com/AdguardTeam/NativeLibsCommon.git"
+    url = "https://github.com/RomanKovalchukDev/NativeLibsCommon"
+    vcs_url = "https://github.com/RomanKovalchukDev/NativeLibsCommon.git"
     description = "Common library for C++ opensource projects"
     settings = "os", "compiler", "build_type", "arch"
     options = {
