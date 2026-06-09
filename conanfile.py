@@ -29,7 +29,7 @@ class NativeLibsCommon(ConanFile):
     exports_sources = patch_files
 
     def requirements(self):
-        self.requires("fmt/10.1.1", transitive_headers=True)
+        self.requires("fmt/12.1.0", transitive_headers=True)
         self.requires("libevent/2.1.11@adguard/oss", transitive_headers=True)
         self.requires("llhttp/9.1.3@adguard/oss", transitive_headers=True)
         self.requires("magic_enum/0.9.5", transitive_headers=True)
@@ -56,10 +56,10 @@ class NativeLibsCommon(ConanFile):
             del self.options.fPIC
 
     def source(self):
-        self.run(f"git init . && git remote add origin {self.vcs_url} && git fetch")
+        self.run(f"git init . && git remote add origin {self.vcs_url} && git fetch --tags")
         if re.match(r'\d+\.\d+\.\d+', self.version) is not None:
-            version_hash = self.conan_data["commit_hash"][self.version]["hash"]
-            self.run("git checkout -f %s" % version_hash)
+            # Use git tag for versioned releases
+            self.run("git checkout -f v%s" % self.version)
         else:
             self.run("git checkout -f %s" % self.version)
         for p in self.patch_files:
@@ -80,7 +80,7 @@ class NativeLibsCommon(ConanFile):
         cmake.build()
 
     def package(self):
-        MODULES = ["common", "http"]
+        MODULES = ["common", "http", "tls"]
         for m in MODULES:
             copy(self, "*.h", src=join(self.source_folder, "%s/include" % m), dst=join(self.package_folder, "include"), keep_path=True)
         copy(self, "*.lib", src=self.build_folder, dst=join(self.package_folder, "lib"), keep_path=False)
@@ -90,7 +90,7 @@ class NativeLibsCommon(ConanFile):
         self.cpp_info.names["cmake_find_package"] = "native_libs_common"
         self.cpp_info.name = "native_libs_common"
         self.cpp_info.includedirs = ["include"]
-        self.cpp_info.libs = ["ag_common", "ag_common_http"]
+        self.cpp_info.libs = ["ag_common", "ag_common_http", "ag_common_tls"]
         self.cpp_info.libdirs = ["lib"]
         self.cpp_info.requires = [
             "fmt::fmt",
@@ -104,5 +104,10 @@ class NativeLibsCommon(ConanFile):
             "pcre2::pcre2",
         ]
         if self.settings.os == "Windows":
-            self.cpp_info.system_libs = ["ws2_32", "iphlpapi", "ntdll"]
+            self.cpp_info.system_libs = ["ws2_32", "iphlpapi", "ntdll", "fwpuclnt"]
+        else:
+            if self.settings.os != "Android":
+                self.cpp_info.system_libs = ["resolv"]
+            if self.settings.os in ["Macos", "iOS"]:
+                self.cpp_info.frameworks = ["Network"]
         self.cpp_info.defines.append("FMT_EXCEPTIONS=0")

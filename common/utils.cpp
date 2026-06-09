@@ -244,6 +244,7 @@ uint32_t utils::gettid(void) {
 }
 #endif // _WIN32
 
+
 std::string utils::encode_to_hex(Uint8View data) {
     static constexpr char TABLE[] = "0123456789abcdef";
     static constexpr size_t NIBBLE_BITS = 4;
@@ -313,6 +314,41 @@ std::string utils::escape_argument_for_shell(std::string_view arg) {
     }
     out += '\'';
     return out;
+}
+
+std::vector<std::string_view> word_wrap(std::string_view text, size_t width) {
+    if (width == 0 || text.size() <= width) {
+        return {text};
+    }
+
+    std::vector<std::string_view> result;
+    result.reserve((text.size() / width) + 1);
+
+    size_t cur_pos = 0;
+    while (cur_pos < text.size()) {
+        size_t cur_width = (text.size() - cur_pos < width) ? text.size() - cur_pos : width;
+        auto segment = text.substr(cur_pos, cur_width);
+
+        // If we are not at the end, and the next char is not a space,
+        // attempt to break the line on the last space in current segment.
+        if (cur_pos + cur_width < text.size() && text[cur_pos + cur_width] != ' ') {
+            auto last_space_pos = segment.find_last_of(' ');
+            if (last_space_pos != std::string_view::npos && last_space_pos != 0) {
+                cur_width = last_space_pos; // Break the line at the last space.
+                segment = text.substr(cur_pos, cur_width);
+            }
+        }
+
+        result.push_back(segment);
+        cur_pos += cur_width;
+
+        // Skip any spaces after the segment to avoid starting the next line with a space.
+        while (cur_pos < text.size() && text[cur_pos] == ' ') {
+            ++cur_pos;
+        }
+    }
+
+    return result;
 }
 
 } // namespace ag

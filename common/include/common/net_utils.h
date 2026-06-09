@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <chrono>
 #include <event2/event.h>
 #include <string>
@@ -9,7 +10,45 @@
 #include "common/error.h"
 #include "common/socket_address.h"
 
+#ifdef _WIN32
+  // The order of includes is important
+  #ifndef WIN32_LEAN_AND_MEAN
+  #  define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <iphlpapi.h>
+  #include <netioapi.h>
+  #include <ifdef.h>
+#endif
+
 namespace ag {
+#ifndef __ANDROID__
+enum RetrieveSystemDnsError: uint8_t {
+    AE_INIT,
+};
+#endif // ifdef __ANDROID__
+
+/**
+ * A system DNS server descriptor. Based on Windows 11 model as the most comprehensive among
+ * the supported platforms.
+ */
+struct SystemDnsServer {
+    /** URL of the DNS server. The syntax corresponds to the one used in the DNS proxy. */
+    std::string address;
+    /**
+     * The network address of the hostname from the URL in `address` field.
+     * @note The library does not check whether the address matches the hostname.
+     */
+    std::optional<SocketAddress> resolved_host;
+};
+
+struct SystemDnsServers {
+    std::vector<SystemDnsServer> main;
+    std::vector<std::string> fallback;
+    std::vector<std::string> bootstrap;
+};
+
 namespace utils {
 
 enum class NetUtilsError {
@@ -37,6 +76,61 @@ enum TransportProtocol {
     TP_UDP,
     TP_TCP,
 };
+
+static constexpr uint32_t PLAIN_DNS_PORT_NUMBER = 53;
+static constexpr std::string_view AG_UNFILTERED_DNS_IPS_V4[] = {
+    "46.243.231.30",
+    "46.243.231.31",
+};
+static constexpr std::string_view AG_UNFILTERED_DNS_IPS_V6[] = {
+    "2a10:50c0::1:ff",
+    "2a10:50c0::2:ff",
+};
+
+#ifdef _WIN32
+/**
+ * Populate `physical_ifs` with the interface indices of physical network adapters.
+ * @return An error code, or `ERROR_SUCCESS`.
+ */
+DWORD win_get_physical_interfaces(std::unordered_set<NET_IFINDEX> &physical_ifs);
+
+/**
+ * Return the network interface which is currently active.
+ * May return 0 in case it is not found.
+ */
+std::uint32_t win_detect_active_if();
+
+/**
+ * Return the string representation of the GUID of the "preferred adapter":
+ * the network interface whose DNS settings Windows considers first when deciding where to send a DNS query.
+ * @return Interface GUID as a string, empty string on error.
+ */
+std::string win_get_preferred_adapter_guid();
+
+/**
+ * Modify the DNS settings for a network interface.
+ *
+ * Equivalent to specifying the preferred/alternative DNS server in IPv4/IPv6 properties in the interface
+ * properties GUI. An empty string is equivalent to selecting "Obtain DNS server address automatically".
+ *
+ * @param dns_list Comma-separated list of nameserver addresses.
+ * @param if_guid Null-terminated interface GUID string. See the `ConvertInterface<X>To<Y>` functions in `netioapi.h`.
+ * @param ipv6 `true` to modify the IPv6 properties, `false` for IPv4.
+ * @return `ERROR_SUCCESS` or an error code defined in Winerror.h. `FormatMessage` with the
+ *         `FORMAT_MESSAGE_FROM_SYSTEM` flag can be used to get a generic description of the error.
+ */
+DWORD win_set_if_nameserver(std::string_view dns_list, const char *if_guid, bool ipv6);
+
+/**
+ * Get the current value of the NameServer property of an interface. Return `std::nullopt` on any error,
+ * including if the property does not exist or isn't a null-terminated string.
+ *
+ * @param if_guid Null-terminated interface GUID string. See the `ConvertInterface<X>To<Y>` functions in `netioapi.h`.
+ * @param ipv6 `true` to get the IPv6 property, `false` for IPv4.
+ */
+std::optional<std::string> win_get_if_nameserver(const char *if_guid, bool ipv6);
+
+#endif // defined _WIN32
 
 /**
  * Split address string to host and port with error
@@ -105,7 +199,28 @@ std::optional<SocketAddress> get_peer_address(evutil_socket_t fd);
  */
 std::optional<SocketAddress> get_local_address(evutil_socket_t fd);
 
+#if !defined(__ANDROID__)
+/**
+ * Retrieve DNS servers
+ */
+Result<SystemDnsServers, RetrieveSystemDnsError> retrieve_system_dns_servers();
+
+#endif // ifdef __ANDROID__
+
 } // namespace utils
+
+#ifndef __ANDROID__
+template <>
+struct ErrorCodeToString<RetrieveSystemDnsError> {
+    std::string operator()(RetrieveSystemDnsError code) {
+        // clang-format off
+        switch (code) {
+        case AE_INIT: return "res_ninit()";
+        }
+        // clang-format on
+    }
+};
+#endif // ifdef __ANDROID__
 
 // clang-format off
 template<>
