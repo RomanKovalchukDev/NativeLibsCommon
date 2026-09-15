@@ -139,7 +139,196 @@ macro(detect_libcxx)
 endmacro()
 
 
+# Split CMAKE_<LANG>_COMPILER into the executable and its arguments.
+# The compiler may be given as a list (`zig;cc;-target;x86_64-linux-musl`), which
+# CMake splits into CMAKE_<LANG>_COMPILER plus a space-separated
+# CMAKE_<LANG>_COMPILER_ARG1 once the language has been enabled. Handle both forms,
+# as this may be called before or after that split has happened.
+function(split_compiler_command LANG EXECUTABLE ARGS)
+    set(_command "${CMAKE_${LANG}_COMPILER}")
+    list(LENGTH _command _command_length)
+    if(_command_length GREATER 1)
+        list(GET _command 0 _executable)
+        list(SUBLIST _command 1 -1 _args)
+    else()
+        set(_executable "${_command}")
+        string(STRIP "${CMAKE_${LANG}_COMPILER_ARG1}" _args_string)
+        if(_args_string STREQUAL "")
+            set(_args "")
+        else()
+            separate_arguments(_args NATIVE_COMMAND "${_args_string}")
+        endif()
+    endif()
+    set(${EXECUTABLE} "${_executable}" PARENT_SCOPE)
+    set(${ARGS} "${_args}" PARENT_SCOPE)
+endfunction()
+
+
+# ZIG_EXECUTABLE/ZIG_ARGS are set only when LANG is compiled by zig
+# (i.e. `zig cc ...` or `zig c++ ...`); both are empty otherwise.
+function(detect_zig_compiler LANG ZIG_EXECUTABLE ZIG_ARGS)
+    set(${ZIG_EXECUTABLE} "" PARENT_SCOPE)
+    set(${ZIG_ARGS} "" PARENT_SCOPE)
+
+    split_compiler_command(${LANG} _executable _args)
+    if(NOT _executable OR NOT _args)
+        return()
+    endif()
+
+    get_filename_component(_executable_name "${_executable}" NAME_WE)
+    if(NOT _executable_name STREQUAL "zig")
+        return()
+    endif()
+
+    # `zig` is a multi-tool: only the cc/c++ subcommands make it a C/C++ compiler.
+    list(GET _args 0 _subcommand)
+    if(NOT _subcommand MATCHES "^(cc|c\\+\\+)$")
+        return()
+    endif()
+
+    set(${ZIG_EXECUTABLE} "${_executable}" PARENT_SCOPE)
+    set(${ZIG_ARGS} "${_args}" PARENT_SCOPE)
+endfunction()
+
+
+# zig builds against its own bundled libc/libc++ headers, so the resulting binaries
+# differ from those of a plain clang of the same version. os.ag_cc_is_zig feeds the
+# package hash to keep the two from sharing a package ID.
+function(detect_cc_is_zig CC_IS_ZIG)
+    is_zig_compiler(C _is_zig)
+    if(_is_zig)
+        message(STATUS "CMake-Conan: [settings] os.ag_cc_is_zig=1")
+        set(${CC_IS_ZIG} "1" PARENT_SCOPE)
+    else()
+        set(${CC_IS_ZIG} "" PARENT_SCOPE)
+    endif()
+endfunction()
+
+
+# Pull the target triple out of `-target <triple>` / `--target=<triple>`; empty if
+# zig was given no explicit target (i.e. it builds for the host).
+function(zig_target_triple ZIG_ARGS TRIPLE)
+    set(${TRIPLE} "" PARENT_SCOPE)
+    set(_expect_triple FALSE)
+    foreach(_arg IN LISTS ZIG_ARGS)
+        if(_expect_triple)
+            set(${TRIPLE} "${_arg}" PARENT_SCOPE)
+            return()
+        endif()
+        if(_arg STREQUAL "-target" OR _arg STREQUAL "--target")
+            set(_expect_triple TRUE)
+        elseif(_arg MATCHES "^--?target=(.+)$")
+            set(${TRIPLE} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+endfunction()
+
+
+# Conan's compiler_executables conf takes a single executable with no arguments, so
+# `zig cc -target ...` cannot be passed through directly. Generate a wrapper script
+# that supplies the subcommand and target, and hand Conan that instead.
+function(write_zig_wrapper LANG ZIG_EXECUTABLE ZIG_ARGS WRAPPER)
+    set(_wrapper_dir "${CMAKE_BINARY_DIR}/zig-wrappers")
+    if(LANG STREQUAL "C")
+        set(_suffix "cc")
+    else()
+        set(_suffix "c++")
+    endif()
+
+    # Name the wrapper `<triple>-cc` after the usual cross-toolchain convention, so
+    # build systems that infer cross-compilation from the compiler name recognise it.
+    # Reject anything that isn't triple-shaped rather than build a path out of it.
+    zig_target_triple("${ZIG_ARGS}" _triple)
+    if(_triple MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
+        set(_wrapper_name "${_triple}-${_suffix}")
+    else()
+        if(_triple)
+            message(WARNING "CMake-Conan: Ignoring unusable zig target triple '${_triple}' "
+                            "for the ${LANG} wrapper name.")
+        endif()
+        set(_wrapper_name "zig-${_suffix}")
+    endif()
+
+    # Quote every argument so targets/flags survive the shell verbatim.
+    set(_quoted_args "")
+    foreach(_arg IN LISTS ZIG_ARGS)
+        string(APPEND _quoted_args " \"${_arg}\"")
+    endforeach()
+
+    if(CMAKE_HOST_WIN32)
+        set(_wrapper "${_wrapper_dir}/${_wrapper_name}.cmd")
+        set(_content "@echo off\r\n\"${ZIG_EXECUTABLE}\"${_quoted_args} %*\r\n")
+    else()
+        set(_wrapper "${_wrapper_dir}/${_wrapper_name}")
+        set(_content "#!/bin/sh\nexec \"${ZIG_EXECUTABLE}\"${_quoted_args} \"$@\"\n")
+    endif()
+
+    file(WRITE "${_wrapper}" "${_content}")
+    file(CHMOD "${_wrapper}" PERMISSIONS
+         OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    message(STATUS "CMake-Conan: Created zig wrapper for ${LANG}: ${_wrapper}")
+    set(${WRAPPER} "${_wrapper}" PARENT_SCOPE)
+endfunction()
+
+
+# Replace `zig cc -target ...` in CMAKE_<LANG>_COMPILER with the wrapper script, so
+# the compiler is a plain single executable for CMake, Conan and everything that
+# prepends to the compiler command. In particular CMAKE_<LANG>_COMPILER_LAUNCHER:
+# sccache/ccache probe the first word of the command (`zig -E ...`), which zig
+# rejects as an unknown command, and the launcher gives up with "compiler not
+# supported". Must run before the language is enabled, i.e. before project().
+function(substitute_zig_compiler LANG)
+    detect_zig_compiler(${LANG} _zig_executable _zig_args)
+
+    if(NOT _zig_executable)
+        # Compiler is no longer zig (or already substituted): drop a stale record.
+        if(_CONAN_ZIG_${LANG}_WRAPPER AND NOT CMAKE_${LANG}_COMPILER STREQUAL "${_CONAN_ZIG_${LANG}_WRAPPER}")
+            unset(_CONAN_ZIG_${LANG}_WRAPPER CACHE)
+            unset(_CONAN_ZIG_${LANG}_COMMAND CACHE)
+        endif()
+        return()
+    endif()
+
+    # On Windows the wrapper is a .cmd, which CMake cannot drive as the compiler.
+    # Leave the command alone there; Conan still gets the wrapper.
+    if(CMAKE_HOST_WIN32)
+        return()
+    endif()
+
+    write_zig_wrapper(${LANG} "${_zig_executable}" "${_zig_args}" _wrapper)
+    # Keep the original command around: once substituted, nothing downstream can
+    # tell that this is zig, and the Conan settings depend on it.
+    set(_CONAN_ZIG_${LANG}_COMMAND "${CMAKE_${LANG}_COMPILER}" CACHE INTERNAL
+        "${LANG} compiler command before the zig wrapper substitution")
+    set(_CONAN_ZIG_${LANG}_WRAPPER "${_wrapper}" CACHE INTERNAL
+        "zig wrapper substituted for the ${LANG} compiler")
+    set(CMAKE_${LANG}_COMPILER "${_wrapper}" CACHE FILEPATH "${LANG} compiler" FORCE)
+    message(STATUS "CMake-Conan: Using zig wrapper as the ${LANG} compiler: ${_wrapper}")
+endfunction()
+
+
+# True when LANG is compiled by zig, whether or not CMAKE_<LANG>_COMPILER has
+# already been replaced by the wrapper.
+function(is_zig_compiler LANG RESULT)
+    detect_zig_compiler(${LANG} _zig_executable _zig_args)
+    if(_zig_executable OR _CONAN_ZIG_${LANG}_WRAPPER)
+        set(${RESULT} TRUE PARENT_SCOPE)
+    else()
+        set(${RESULT} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
+
 function(detect_lib_cxx LIB_CXX)
+    # zig bundles its own libc++ and selects it per target; pinning compiler.libcxx
+    # here would only add a setting Conan cannot honour through the wrapper.
+    is_zig_compiler(CXX _is_zig)
+    if(_is_zig)
+        message(STATUS "CMake-Conan: zig C++ compiler detected, omitting compiler.libcxx")
+        return()
+    endif()
+
     if(CMAKE_SYSTEM_NAME STREQUAL "Android")
         message(STATUS "CMake-Conan: android_stl=${CMAKE_ANDROID_STL_TYPE}")
         set(${LIB_CXX} ${CMAKE_ANDROID_STL_TYPE} PARENT_SCOPE)
@@ -270,17 +459,32 @@ function(detect_build_type BUILD_TYPE)
 endfunction()
 
 
+# Resolve the executable to hand to Conan for LANG, substituting a generated
+# wrapper script when the compiler is `zig cc`/`zig c++`.
+function(conan_compiler_executable LANG EXECUTABLE)
+    detect_zig_compiler(${LANG} _zig_executable _zig_args)
+    if(_zig_executable)
+        write_zig_wrapper(${LANG} "${_zig_executable}" "${_zig_args}" _wrapper)
+        set(${EXECUTABLE} "${_wrapper}" PARENT_SCOPE)
+    else()
+        set(${EXECUTABLE} "${CMAKE_${LANG}_COMPILER}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+
 macro(append_compiler_executables_configuration)
     set(_conan_c_compiler "")
     set(_conan_cpp_compiler "")
     if(CMAKE_C_COMPILER)
-        set(_conan_c_compiler "\"c\":\"${CMAKE_C_COMPILER}\",")
+        conan_compiler_executable(C _c_executable)
+        set(_conan_c_compiler "\"c\":\"${_c_executable}\",")
     else()
         message(WARNING "CMake-Conan: The C compiler is not defined. "
                         "Please define CMAKE_C_COMPILER or enable the C language.")
     endif()
     if(CMAKE_CXX_COMPILER)
-        set(_conan_cpp_compiler "\"cpp\":\"${CMAKE_CXX_COMPILER}\"")
+        conan_compiler_executable(CXX _cpp_executable)
+        set(_conan_cpp_compiler "\"cpp\":\"${_cpp_executable}\"")
     else()
         message(WARNING "CMake-Conan: The C++ compiler is not defined. "
                         "Please define CMAKE_CXX_COMPILER or enable the C++ language.")
@@ -289,6 +493,8 @@ macro(append_compiler_executables_configuration)
     string(APPEND PROFILE "tools.build:compiler_executables={${_conan_c_compiler}${_conan_cpp_compiler}}\n")
     unset(_conan_c_compiler)
     unset(_conan_cpp_compiler)
+    unset(_c_executable)
+    unset(_cpp_executable)
 endmacro()
 
 
@@ -299,6 +505,7 @@ function(detect_host_profile output_file)
     detect_cxx_standard(MYCXX_STANDARD)
     detect_lib_cxx(MYLIB_CXX)
     detect_build_type(MYBUILD_TYPE)
+    detect_cc_is_zig(MYCC_IS_ZIG)
 
     set(PROFILE "")
     string(APPEND PROFILE "[settings]\n")
@@ -319,6 +526,10 @@ function(detect_host_profile output_file)
     endif()
     if(MYOS_SUBSYSTEM)
         string(APPEND PROFILE os.subsystem=${MYOS_SUBSYSTEM} "\n")
+    endif()
+    # os.ag_cc_is_zig is only defined as a sub-setting of os, so it needs os to be set.
+    if(MYOS AND MYCC_IS_ZIG)
+        string(APPEND PROFILE os.ag_cc_is_zig=${MYCC_IS_ZIG} "\n")
     endif()
     if(MYCOMPILER)
         string(APPEND PROFILE compiler=${MYCOMPILER} "\n")
@@ -596,10 +807,23 @@ endmacro()
 # to check if the dependency provider was invoked at all.
 cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL conan_provide_dependency_check)
 
+# This file is pulled in through CMAKE_PROJECT_TOP_LEVEL_INCLUDES, i.e. from
+# project() but before any language is enabled, which is the only point where
+# CMAKE_<LANG>_COMPILER can still be rewritten without upsetting CMake.
+substitute_zig_compiler(C)
+substitute_zig_compiler(CXX)
+
+# Profile selection must see the compiler command as the user gave it, not the
+# substituted wrapper, so that it does not depend on which configure run this is.
+set(_C_COMPILER_COMMAND "${CMAKE_C_COMPILER}")
+if(_CONAN_ZIG_C_COMMAND)
+    set(_C_COMPILER_COMMAND "${_CONAN_ZIG_C_COMMAND}")
+endif()
+
 # Detect conan profile to use
 set(_PROFILES_DIR ${CMAKE_CURRENT_LIST_DIR}/../conan/profiles)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if (CMAKE_C_COMPILER MATCHES ".*-musl(eabi)?-.*")
+    if (_C_COMPILER_COMMAND MATCHES ".*-musl(eabi)?-.*")
         if(SANITIZE)
             set(_SELECTED_PROFILE "${_PROFILES_DIR}/linux-musl-asan.jinja")
         else()

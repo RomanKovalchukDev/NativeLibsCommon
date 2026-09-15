@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cassert>
+#include <cstring>
 #include <utility>
 
 #include <openssl/err.h>
@@ -20,8 +21,8 @@ namespace ag::http {
 static const Logger g_logger("H3");    // NOLINT(*-identifier-naming)
 static std::atomic_uint32_t g_next_id; // NOLINT(*-avoid-non-const-global-variables)
 
-// Typical DCID length in an initial packet (SCID is zero bytes length in case of Chrome)
-static constexpr size_t ORIGINAL_DCID_DATALEN = 18;
+// DCID length in the Initial packet matches Chrome's QUIC fingerprint (Chrome uses 8 bytes, SCID = 0 bytes)
+static constexpr size_t ORIGINAL_DCID_DATALEN = 8;
 // Typical DCID length after handshake
 static constexpr size_t ACCEPTED_DCID_DATA_LEN = 12;
 static constexpr uint64_t ACTIVE_CONNECTION_ID_LIMIT = 7;
@@ -218,6 +219,12 @@ int Http3Session<T>::on_data_chunk_recv(
         nghttp3_conn *, int64_t stream_id, const uint8_t *data, size_t len, void *arg, void *) {
     auto *self = (Http3Session *) arg;
     log_sid(trace, self->m_id, stream_id, "{}", len);
+
+    // Body data is handed over to the application, which may hold on to it for a while and extend the
+    // stream-level window later via `consume_stream()`. The connection-level window, however, is extended
+    // right away, so that streams the application does not consume throttle only themselves and do not
+    // eat into the budget shared with every other stream on the same connection.
+    self->consume_connection_impl(len);
 
     auto iter = self->m_streams.find(stream_id);
     if (iter == self->m_streams.end()) {
@@ -490,8 +497,8 @@ static void log_http3(const char *format, va_list args) {
 #endif
 
 template <typename T>
-Error<Http3Error> Http3Session<T>::initialize_session(
-        const QuicNetworkPath &path, ag::UniquePtr<SSL, &SSL_free> ssl, ngtcp2_cid client_scid, ngtcp2_cid client_dcid) {
+Error<Http3Error> Http3Session<T>::initialize_session(const QuicNetworkPath &path, ag::UniquePtr<SSL, &SSL_free> ssl,
+        ngtcp2_cid client_scid, ngtcp2_cid client_dcid, uint32_t client_chosen_version) {
     if (ssl == nullptr) {
         return make_error(Http3Error{NGTCP2_ERR_INTERNAL}, "SSL handle mustn't be null");
     }
@@ -583,14 +590,14 @@ Error<Http3Error> Http3Session<T>::initialize_session(
                     },
             .delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb,
             .delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb,
-            .get_path_challenge_data = ngtcp2_crypto_get_path_challenge_data_cb,
             .stream_stop_sending = on_quic_stream_stop_sending,
             .version_negotiation = ngtcp2_crypto_version_negotiation_cb,
+            .get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb,
     };
     // Client and server have different callbacks for handshake completion.
     // Server uses `handshake_completed`, and after that immediately ready to process requests.
-    // When clients confirms handshake, server may not be ready yet, so there is additional callback `handshake_confirmed`
-    // which fired when server's confirmation is received.
+    // When clients confirms handshake, server may not be ready yet, so there is additional callback
+    // `handshake_confirmed` which fired when server's confirmation is received.
     if constexpr (std::is_same_v<T, Http3Server>) {
         quic_callbacks.handshake_completed = on_handshake_completed;
     } else {
@@ -599,6 +606,8 @@ Error<Http3Error> Http3Session<T>::initialize_session(
 
     ngtcp2_settings quic_settings;
     ngtcp2_settings_default(&quic_settings);
+    // Start packet number at 1 to match Chrome's QUIC fingerprint (Chrome's first Initial packet has PKN=1)
+    quic_settings.initial_pkt_num = 1;
     quic_settings.cc_algo = to_ng_cc_algo(m_settings.congestion_control_algorithm);
     quic_settings.initial_ts = ts();
     quic_settings.initial_rtt = NGTCP2_DEFAULT_INITIAL_RTT / 2;
@@ -606,6 +615,8 @@ Error<Http3Error> Http3Session<T>::initialize_session(
         quic_settings.log_printf = log_quic;
     }
     quic_settings.max_tx_udp_payload_size = m_settings.max_tx_udp_payload_size;
+    quic_settings.max_window = m_settings.max_window;
+    quic_settings.max_stream_window = m_settings.max_stream_window;
 
     ngtcp2_transport_params transport_params;
     ngtcp2_transport_params_default(&transport_params);
@@ -643,10 +654,9 @@ Error<Http3Error> Http3Session<T>::initialize_session(
         transport_params.stateless_reset_token_present = true;
 
         if (int status = ngtcp2_conn_server_new(&quic_conn, &client_scid, &server_scid, &path_storage.path,
-                    NGTCP2_PROTO_VER_V1, &quic_callbacks, &quic_settings, &transport_params, nullptr, this);
+                    client_chosen_version, &quic_callbacks, &quic_settings, &transport_params, nullptr, this);
                 status != NGTCP2_NO_ERROR) {
-            return make_error(
-                    Http3Error{status}, "Couldn't create quic connection");
+            return make_error(Http3Error{status}, "Couldn't create quic connection");
         }
 
         if (int status = nghttp3_conn_server_new(&h3_conn, &h3_callbacks, &h3_settings, nghttp3_mem_default(), this);
@@ -662,10 +672,9 @@ Error<Http3Error> Http3Session<T>::initialize_session(
         }
 
         if (int status = ngtcp2_conn_client_new(&quic_conn, &client_dcid, &client_scid, &path_storage.path,
-                    NGTCP2_PROTO_VER_V1, &quic_callbacks, &quic_settings, &transport_params, nullptr, this);
+                    client_chosen_version, &quic_callbacks, &quic_settings, &transport_params, nullptr, this);
                 status != NGTCP2_NO_ERROR) {
-            return make_error(
-                    Http3Error{status}, "Couldn't create quic connection");
+            return make_error(Http3Error{status}, "Couldn't create quic connection");
         }
 
         if (int status = nghttp3_conn_client_new(&h3_conn, &h3_callbacks, &h3_settings, nghttp3_mem_default(), this);
@@ -710,11 +719,13 @@ Error<Http3Error> Http3Session<T>::submit_trailer_impl(uint64_t stream_id, const
     if (int status =
                     nghttp3_conn_submit_trailers(m_http_conn.get(), int32_t(stream_id), nv_list.data(), nv_list.size());
             status != 0) {
-        return make_error(Http3Error{NGTCP2_ERR_INTERNAL}, AG_FMT("submit_trailers(): {} ({})", nghttp3_strerror(status), status));
+        return make_error(Http3Error{NGTCP2_ERR_INTERNAL},
+                AG_FMT("submit_trailers(): {} ({})", nghttp3_strerror(status), status));
     }
 
     if (int status = nghttp3_conn_resume_stream(m_http_conn.get(), int64_t(stream_id)); status != 0) {
-        return make_error(Http3Error{NGTCP2_ERR_NOMEM}, AG_FMT("Couldn't resume stream: {} ({})", nghttp3_strerror(status), status));
+        return make_error(Http3Error{NGTCP2_ERR_NOMEM},
+                AG_FMT("Couldn't resume stream: {} ({})", nghttp3_strerror(status), status));
     }
 
     stream.flags.set(Stream::TRAILERS_SUBMITTED);
@@ -733,6 +744,8 @@ int Http3Session<T>::recv_h3_stream_data(int64_t stream_id, Uint8View chunk, boo
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
 
+    // These bytes never reach the application, so both windows are extended here.
+    consume_connection_impl(r);
     if (Error<Http3Error> error = consume_stream_impl(stream_id, r); error != nullptr) {
         log_sid(dbg, m_id, stream_id, "Couldn't consume stream: {}", error->str());
         return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -747,8 +760,22 @@ Error<Http3Error> Http3Session<T>::push_data(Stream &stream, Uint8View chunk, bo
         stream.data_source.buffer.reset(evbuffer_new());
     }
     stream.flags.set(Stream::HAS_EOF, eof);
-    if (0 != evbuffer_add(stream.data_source.buffer.get(), chunk.data(), chunk.size())) {
-        return make_error(Http3Error{NGTCP2_ERR_NOMEM}, "Couldn't write data in buffer");
+    if (!chunk.empty()) {
+        // nghttp3's read_data callback is no-copy: it keeps raw pointers into this buffer
+        // until the data is acknowledged, and ngtcp2 re-reads them for retransmission.
+        auto owned = std::make_unique_for_overwrite<uint8_t[]>(chunk.size());
+        std::memcpy(owned.get(), chunk.data(), chunk.size());
+        if (0
+                != evbuffer_add_reference(
+                        stream.data_source.buffer.get(), owned.get(), chunk.size(),
+                        [](const void *, size_t, void *arg) {
+                            delete[] static_cast<uint8_t *>(arg);
+                        },
+                        owned.get())) {
+            return make_error(Http3Error{NGTCP2_ERR_NOMEM}, "Couldn't write data in buffer");
+        }
+        // Ownership handed off to the evbuffer; the cleanup callback frees it on ACK/drain.
+        (void) owned.release();
     }
 
     return {};
@@ -768,7 +795,8 @@ Error<Http3Error> Http3Session<T>::submit_body_impl(uint64_t stream_id, Uint8Vie
         return error;
     }
     if (int status = nghttp3_conn_resume_stream(m_http_conn.get(), int64_t(stream_id)); status != 0) {
-        return make_error(Http3Error{NGTCP2_ERR_NOMEM}, AG_FMT("Couldn't resume stream: {} ({})", nghttp3_strerror(status), status));
+        return make_error(Http3Error{NGTCP2_ERR_NOMEM},
+                AG_FMT("Couldn't resume stream: {} ({})", nghttp3_strerror(status), status));
     }
 
     return {};
@@ -794,10 +822,6 @@ Error<Http3Error> Http3Session<T>::consume_connection_impl(size_t length) {
 
 template <typename T>
 Error<Http3Error> Http3Session<T>::consume_stream_impl(uint64_t stream_id, size_t length) {
-    if (Error<Http3Error> error = consume_connection_impl(length); error != nullptr) {
-        return make_error(Http3Error{NGTCP2_ERR_INTERNAL}, "Couldn't consume connection", error);
-    }
-
     if (int status = ngtcp2_conn_extend_max_stream_offset(m_quic_conn.get(), int64_t(stream_id), length);
             status != NGTCP2_NO_ERROR) {
         return make_error(Http3Error{status}, "Couldn't consume stream");
@@ -839,8 +863,8 @@ Error<Http3Error> Http3Session<T>::flush_impl() {
             } else {
                 log_sid(dbg, m_id, write_stream_id, "Couldn't write stream data: {} ({})", reason, vec_num);
             }
-            ngtcp2_ccerr_set_application_error(
-                    &m_last_error, nghttp3_err_infer_quic_app_error_code(int(vec_num)), (const uint8_t *) reason.data(), reason.size());
+            ngtcp2_ccerr_set_application_error(&m_last_error, nghttp3_err_infer_quic_app_error_code(int(vec_num)),
+                    (const uint8_t *) reason.data(), reason.size());
             goto loop_exit; // NOLINT(*-avoid-goto)
         }
         ngtcp2_ssize data_len = 0;
@@ -862,8 +886,8 @@ Error<Http3Error> Http3Session<T>::flush_impl() {
             if (int status = nghttp3_conn_add_write_offset(m_http_conn.get(), write_stream_id, data_len); status != 0) {
                 std::string_view reason = nghttp3_strerror(status);
                 log_sid(dbg, m_id, write_stream_id, "Couldn't add write offset: {} ({})", reason, status);
-                ngtcp2_ccerr_set_application_error(
-                        &m_last_error, nghttp3_err_infer_quic_app_error_code(status), (const uint8_t *) reason.data(), reason.size());
+                ngtcp2_ccerr_set_application_error(&m_last_error, nghttp3_err_infer_quic_app_error_code(status),
+                        (const uint8_t *) reason.data(), reason.size());
                 goto loop_exit; // NOLINT(*-avoid-goto)
             }
         }
@@ -879,13 +903,10 @@ Error<Http3Error> Http3Session<T>::flush_impl() {
                         },
                         {buf, size_t(r)});
             }
-            if (write_stream_id != -1) {
-                continue;
-            }
-            goto loop_exit; // NOLINT(*-avoid-goto)
+            continue;
         }
 
-        if (r == NGTCP2_NO_ERROR) {
+        if (r == 0) {
             goto loop_exit; // NOLINT(*-avoid-goto)
         }
 
@@ -920,7 +941,8 @@ loop_exit:
     if (m_last_error.error_code != NGTCP2_NO_ERROR) {
         handle_error();
         return make_error(Http3Error{last_liberr ? last_liberr : NGTCP2_ERR_INTERNAL},
-                AG_FMT("{} ({})", std::string_view{(const char *) m_last_error.reason, m_last_error.reasonlen}, m_last_error.error_code));
+                AG_FMT("{} ({})", std::string_view{(const char *) m_last_error.reason, m_last_error.reasonlen},
+                        m_last_error.error_code));
     }
 
     ngtcp2_tstamp now = ts();
@@ -931,6 +953,26 @@ loop_exit:
     }
 
     return {};
+}
+
+template <typename T>
+size_t Http3Session<T>::get_stream_send_capacity_impl(uint64_t stream_id) const {
+    // Remaining QUIC flow-control window: the lesser of the stream- and connection-level limits.
+    // For an unknown stream `ngtcp2_conn_get_max_stream_data_left` returns 0, so capacity becomes 0.
+    uint64_t capacity = std::min(ngtcp2_conn_get_max_stream_data_left(m_quic_conn.get(), int64_t(stream_id)),
+            ngtcp2_conn_get_max_data_left(m_quic_conn.get()));
+
+    // Subtract data already submitted but not yet handed to the transport, so the reported
+    // capacity bounds the inner send buffer to a single flow-control window.
+    if (auto iter = m_streams.find(stream_id);
+            iter != m_streams.end() && iter->second.data_source.buffer != nullptr) {
+        const DataSource &ds = iter->second.data_source;
+        size_t buffered = evbuffer_get_length(ds.buffer.get());
+        size_t unsent = buffered > ds.read_offset ? buffered - ds.read_offset : 0;
+        capacity = unsent >= capacity ? 0 : capacity - unsent;
+    }
+
+    return capacity;
 }
 
 template <typename T>
@@ -1024,8 +1066,9 @@ template <typename T>
 int Http3Session<T>::on_deferred_consume(nghttp3_conn *, int64_t stream_id, size_t consumed, void *arg, void *) {
     auto *self = (Http3Session *) arg;
 
-    Error<Http3Error> error = self->consume_stream_impl(stream_id, consumed);
-    if (error != nullptr) {
+    // These bytes never reach the application, so both windows are extended here.
+    self->consume_connection_impl(consumed);
+    if (Error<Http3Error> error = self->consume_stream_impl(stream_id, consumed); error != nullptr) {
         log_sid(dbg, self->m_id, stream_id, "{}", error->str());
         return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
@@ -1053,6 +1096,8 @@ void Http3Session<T>::handle_rx_connection_close() {
     }
     case NGTCP2_CCERR_TYPE_VERSION_NEGOTIATION:
     case NGTCP2_CCERR_TYPE_IDLE_CLOSE:
+    case NGTCP2_CCERR_TYPE_DROP_CONN:
+    case NGTCP2_CCERR_TYPE_RETRY:
         break;
     }
 
@@ -1132,7 +1177,8 @@ Result<std::unique_ptr<Http3Server>, Http3Error> Http3Server::accept(const Http3
     }
 
     auto self = std::make_unique<Http3Server>(PrivateAccess{}, settings, handler);
-    auto error = self->initialize_session(path, std::move(ssl), hd.scid, hd.dcid);
+    // Answer with the exact QUIC version the client chose, rather than a fixed one.
+    auto error = self->initialize_session(path, std::move(ssl), hd.scid, hd.dcid, hd.version);
     if (error != nullptr) {
         return error;
     }
@@ -1194,8 +1240,8 @@ Result<Http3Server::InputResult, Http3Error> Http3Server::input(const QuicNetwor
         if (m_last_error.error_code == 0) {
             ngtcp2_ccerr_set_tls_alert(&m_last_error, alert, nullptr, 0);
         }
-        error = make_error(Http3Error{status}, AG_FMT("TLS alert: {} ({})",
-                        SSL_alert_desc_string_long(alert), SSL_alert_type_string_long(alert)));
+        error = make_error(Http3Error{status},
+                AG_FMT("TLS alert: {} ({})", SSL_alert_desc_string_long(alert), SSL_alert_type_string_long(alert)));
         break;
     }
     default:
@@ -1234,11 +1280,13 @@ Error<Http3Error> Http3Server::submit_response(uint64_t stream_id, const Respons
     if (int status = nghttp3_conn_submit_response(
                 m_http_conn.get(), int64_t(stream_id), nv_list.data(), nv_list.size(), eof ? nullptr : &reader);
             status != 0) {
-        return make_error(Http3Error{NGTCP2_ERR_INTERNAL}, AG_FMT("Couldn't submit response: {} ({})", nghttp3_strerror(status), status));
+        return make_error(Http3Error{NGTCP2_ERR_INTERNAL},
+                AG_FMT("Couldn't submit response: {} ({})", nghttp3_strerror(status), status));
     }
 
     if (int status = nghttp3_conn_resume_stream(m_http_conn.get(), int64_t(stream_id)); status != 0) {
-        return make_error(Http3Error{NGTCP2_ERR_NOMEM}, AG_FMT("Couldn't resume stream: {} ({})", nghttp3_strerror(status), status));
+        return make_error(Http3Error{NGTCP2_ERR_NOMEM},
+                AG_FMT("Couldn't resume stream: {} ({})", nghttp3_strerror(status), status));
     }
 
     return {};
@@ -1295,7 +1343,8 @@ Http3Client::Http3Client(PrivateAccess, const Http3Settings &settings, const Cal
 Result<std::unique_ptr<Http3Client>, Http3Error> Http3Client::connect(const Http3Settings &settings,
         const Callbacks &handler, const QuicNetworkPath &path, ag::UniquePtr<SSL, &SSL_free> ssl) {
     auto self = std::make_unique<Http3Client>(PrivateAccess{}, settings, handler);
-    auto error = self->initialize_session(path, std::move(ssl), {}, {});
+    uint32_t client_chosen_version = settings.quic_version != 0 ? settings.quic_version : NGTCP2_PROTO_VER_V1;
+    auto error = self->initialize_session(path, std::move(ssl), {}, {}, client_chosen_version);
     if (error != nullptr) {
         return error;
     }
@@ -1323,8 +1372,8 @@ Error<Http3Error> Http3Client::input(const QuicNetworkPath &path, Uint8View chun
         if (m_last_error.error_code == 0) {
             ngtcp2_ccerr_set_tls_alert(&m_last_error, alert, nullptr, 0);
         }
-        error = make_error(Http3Error{status}, AG_FMT("TLS alert: {} ({})",
-                        SSL_alert_desc_string_long(alert), SSL_alert_type_string_long(alert)));
+        error = make_error(Http3Error{status},
+                AG_FMT("TLS alert: {} ({})", SSL_alert_desc_string_long(alert), SSL_alert_type_string_long(alert)));
         break;
     }
     default:
@@ -1332,7 +1381,8 @@ Error<Http3Error> Http3Client::input(const QuicNetworkPath &path, Uint8View chun
             ngtcp2_ccerr_set_liberr(&m_last_error, status, nullptr, 0);
         }
         return make_error(Http3Error{status ? status : NGTCP2_ERR_INTERNAL},
-                AG_FMT("{} ({})", std::string_view{(const char *) m_last_error.reason, m_last_error.reasonlen}, m_last_error.error_code));
+                AG_FMT("{} ({})", std::string_view{(const char *) m_last_error.reason, m_last_error.reasonlen},
+                        m_last_error.error_code));
         break;
     }
 
@@ -1345,7 +1395,8 @@ Error<Http3Error> Http3Client::input(const QuicNetworkPath &path, Uint8View chun
 Result<uint64_t, Http3Error> Http3Client::submit_request(const Request &request, bool eof) {
     int64_t stream_id = 0;
     if (int status = ngtcp2_conn_open_bidi_stream(m_quic_conn.get(), &stream_id, nullptr); status != NGTCP2_NO_ERROR) {
-        return make_error(Http3Error{status}, "Couldn't open stream: {} ({})");
+        return make_error(
+                Http3Error{status}, AG_FMT("Couldn't open stream: {} ({})", nghttp3_strerror(status), status));
     }
 
     bool head_request = request.method() == "HEAD";
@@ -1371,7 +1422,8 @@ Result<uint64_t, Http3Error> Http3Client::submit_request(const Request &request,
                 m_http_conn.get(), stream_id, nv_list.data(), nv_list.size(), eof ? nullptr : &reader, nullptr);
             status != 0) {
         m_streams.erase(stream_id);
-        return make_error(Http3Error{NGTCP2_INTERNAL_ERROR}, AG_FMT("Couldn't submit request: {} ({})", nghttp3_strerror(status), status));
+        return make_error(Http3Error{NGTCP2_ERR_INTERNAL},
+                AG_FMT("Couldn't submit request: {} ({})", nghttp3_strerror(status), status));
     }
 
     return uint64_t(stream_id);
@@ -1416,8 +1468,26 @@ Error<Http3Error> Http3Client::flush() {
     return flush_impl();
 }
 
+void Http3Client::update_callbacks(const Callbacks &handler) {
+    m_handler = handler;
+}
+
 Nanos Http3Client::probe_timeout() const {
     return Nanos{ngtcp2_conn_get_pto(m_quic_conn.get())};
+}
+
+ngtcp2_conn_info Http3Client::get_stats() const {
+    ngtcp2_conn_info info{};
+    ngtcp2_conn_get_conn_info(m_quic_conn.get(), &info);
+    return info;
+}
+
+SSL *Http3Client::get_ssl() const {
+    return m_ssl.get();
+}
+
+size_t Http3Client::get_stream_send_capacity(uint64_t stream_id) const {
+    return get_stream_send_capacity_impl(stream_id);
 }
 
 } // namespace ag::http

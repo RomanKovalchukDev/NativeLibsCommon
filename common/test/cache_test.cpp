@@ -12,7 +12,7 @@ public:
     }
 
 protected:
-    ag::LruCache<int, std::string> m_cache;
+    ag::LruCache<size_t, std::string> m_cache;
 
     void SetUp() override {
         for (size_t i = 0; i < CACHE_SIZE; ++i) {
@@ -127,7 +127,7 @@ TEST_F(LruCacheTest, UpdateCapacity) {
     ASSERT_EQ(m_cache.size(), CACHE_SIZE / 2);
 
     for (size_t i = 0; i < CACHE_SIZE / 2; ++i) {
-        ASSERT_FALSE(m_cache.get(i)) << i << std::endl;
+        ASSERT_FALSE(m_cache.get(i)) << i << '\n';
     }
 }
 
@@ -223,7 +223,7 @@ TEST(LruTimeoutCache, PreservesLaterDeadline) {
     ASSERT_FALSE(cache.get(1));
 
     cache.insert(1, "one", 2h);
-    cache.insert(1, "one", 1h, /*preserve_longer_timeout*/true);
+    cache.insert(1, "one", 1h, /*preserve_longer_timeout*/ true);
     ag::SteadyClock::add_time_shift(1h + 1s);
     ASSERT_TRUE(cache.get(1)); // Access resets the entry timeout.
     ag::SteadyClock::add_time_shift(2h + 1s);
@@ -241,7 +241,7 @@ TEST(LruTimeoutCache, PreservesLaterDeadline) {
     // Check timeout is reset to `max(to, existing.to)`.
     cache.insert(1, "one", 2h);
     ag::SteadyClock::add_time_shift(1h + 1s);
-    cache.insert(1, "one", 1h, /*preserve_longer_timeout*/true);
+    cache.insert(1, "one", 1h, /*preserve_longer_timeout*/ true);
     ag::SteadyClock::add_time_shift(1h + 1s);
     ASSERT_TRUE(cache.get(1)); // Access resets the entry timeout.
     ag::SteadyClock::add_time_shift(2h + 1s);

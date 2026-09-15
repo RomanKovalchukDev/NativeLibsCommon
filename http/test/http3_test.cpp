@@ -10,8 +10,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #else
-#include <netdb.h>
 #include <fcntl.h>
+#include <netdb.h>
 #endif
 
 #include <event2/event.h>
@@ -78,6 +78,8 @@ protected:
     std::map<uint64_t, Stream> streams;
     std::unique_ptr<ag::http::Http3Client> session;
     bool handshake_completed = false;
+    // Settings the fixture connects with. Derived fixtures may tweak this before SetUp runs.
+    ag::http::Http3Settings client_settings{};
 
     void SetUp() override {
         ag::Logger::set_log_level(ag::LOG_LEVEL_TRACE);
@@ -149,7 +151,7 @@ protected:
         bound_addr = ag::utils::get_local_address(fd).value();
         infolog(logger, "Bound address: {}", bound_addr.str());
 
-        ag::Result make_result = ag::http::Http3Client::connect(ag::http::Http3Settings{}, handler,
+        ag::Result make_result = ag::http::Http3Client::connect(client_settings, handler,
                 ag::http::QuicNetworkPath{
                         .local = bound_addr.c_sockaddr(),
                         .local_len = bound_addr.c_socklen(),
@@ -243,7 +245,7 @@ protected:
         auto *self = (Http3Client *) arg;
         timeval tv{};
         tv.tv_sec = std::chrono::duration_cast<ag::Secs>(period).count();
-        tv.tv_usec = std::chrono::duration_cast<ag::Micros>(period).count() % 1000000;
+        tv.tv_usec = (decltype(tv.tv_usec)) (std::chrono::duration_cast<ag::Micros>(period).count() % 1000000);
         event_add(self->expiry_timer.get(), &tv);
     }
 
@@ -258,7 +260,7 @@ protected:
                 this)};
         timeval tv{};
         tv.tv_sec = std::chrono::duration_cast<ag::Secs>(timeout).count();
-        tv.tv_usec = std::chrono::duration_cast<ag::Micros>(timeout).count() % 1000000;
+        tv.tv_usec = (decltype(tv.tv_usec)) (std::chrono::duration_cast<ag::Micros>(timeout).count() % 1000000);
         ASSERT_EQ(0, event_add(timer.get(), &tv));
 
         ag::UniquePtr<event, &event_free> read_event(event_new(
@@ -306,7 +308,24 @@ protected:
     }
 };
 
-TEST_F(Http3Client, Exchange) {
+// Runs the client flow with a specific offered QUIC version. Zero uses the library default
+// (`NGTCP2_PROTO_VER_V1`). The handshake in SetUp only completes if the server honours the
+// client-chosen version, so a passing exchange proves the version setting is applied end-to-end.
+class Http3ClientVersioned : public Http3Client, public ::testing::WithParamInterface<uint32_t> {
+protected:
+    void SetUp() override {
+        client_settings.quic_version = GetParam();
+        Http3Client::SetUp();
+    }
+};
+
+INSTANTIATE_TEST_SUITE_P(QuicVersion, Http3ClientVersioned,
+        ::testing::Values(uint32_t{0}, NGTCP2_PROTO_VER_V2),
+        [](const ::testing::TestParamInfo<uint32_t> &info) {
+            return info.param == 0 ? "Default" : "V2";
+        });
+
+TEST_P(Http3ClientVersioned, Exchange) {
     ag::http::Request request(ag::http::HTTP_3_0, "GET", "/");
     request.authority(SERVER_NAME);
     request.scheme("https");
@@ -486,6 +505,32 @@ TEST_F(Http3Client, Upload) {
     }
 }
 
+TEST_F(Http3Client, StreamSendCapacity) {
+    // An unknown stream has no send capacity.
+    EXPECT_EQ(0u, session->get_stream_send_capacity(12345678));
+
+    // Open a request stream we can send a body on (no eof keeps the write side open).
+    ag::http::Request request(ag::http::HTTP_3_0, "POST", UPLOAD_REQUEST_PATH);
+    request.authority(SERVER_NAME);
+    request.scheme("https");
+    ag::Result request_result = session->submit_request(request, false);
+    ASSERT_TRUE(request_result.has_value()) << request_result.error()->str();
+    uint64_t stream_id = request_result.value();
+    streams[stream_id] = {};
+
+    // A freshly opened stream has a non-zero flow-control send window.
+    size_t capacity = session->get_stream_send_capacity(stream_id);
+    ASSERT_GT(capacity, 0u);
+
+    // Buffer a body exactly as large as the window, but do not flush it into the wire.
+    // The not-yet-sent data must be subtracted from the reported capacity, leaving zero.
+    std::vector<uint8_t> chunk(capacity);
+    ag::Error<ag::http::Http3Error> error = session->submit_body(stream_id, {chunk.data(), chunk.size()}, false);
+    ASSERT_EQ(error, nullptr) << error->str();
+
+    EXPECT_EQ(0u, session->get_stream_send_capacity(stream_id));
+}
+
 TEST_F(Http3Client, MaxStreamsNumberDontLeak) {
     ag::http::Request request(ag::http::HTTP_3_0, "GET", "/");
     request.authority(SERVER_NAME);
@@ -499,4 +544,179 @@ TEST_F(Http3Client, MaxStreamsNumberDontLeak) {
         ASSERT_NO_FATAL_FAILURE(wait_readable(ag::Secs{5}));
         ASSERT_NO_FATAL_FAILURE(read_out_socket());
     }
+}
+
+TEST_F(Http3Client, FlushLoopContinuesPastControlOnlyPacket) {
+    ag::http::Request request(ag::http::HTTP_3_0, "GET", "/");
+    request.authority(SERVER_NAME);
+    request.scheme("https");
+
+    static constexpr int NUM_CONCURRENT = 3;
+    for (int i = 0; i < NUM_CONCURRENT; ++i) {
+        ag::Result r = session->submit_request(request, true);
+        ASSERT_TRUE(r.has_value()) << r.error()->str();
+        streams[r.value()] = {};
+    }
+    ASSERT_NO_FATAL_FAILURE(flush_session());
+
+    int responses = 0;
+    while (responses < NUM_CONCURRENT) {
+        ASSERT_NO_FATAL_FAILURE(wait_readable(ag::Secs{5}));
+        ASSERT_NO_FATAL_FAILURE(read_out_socket());
+        ASSERT_NO_FATAL_FAILURE(flush_session());
+        responses = int(std::count_if(streams.begin(), streams.end(), [](const auto &kv) {
+            return kv.second.response.has_value();
+        }));
+    }
+    for (auto &[id, s] : streams) {
+        ASSERT_EQ(s.response->status_code(), 200) << "stream_id=" << id;
+    }
+}
+
+TEST_F(Http3Client, UpdateCallbacks) {
+    ag::http::Request request(ag::http::HTTP_3_0, "GET", "/");
+    request.authority(SERVER_NAME);
+    request.scheme("https");
+
+    // First request — original callbacks.
+    ag::Result r1 = session->submit_request(request, true);
+    ASSERT_TRUE(r1.has_value()) << r1.error()->str();
+    streams[r1.value()] = {};
+    ASSERT_NO_FATAL_FAILURE(flush_session());
+
+    while (!streams[r1.value()].response.has_value()) {
+        ASSERT_NO_FATAL_FAILURE(wait_readable(ag::Secs{5}));
+        ASSERT_NO_FATAL_FAILURE(read_out_socket());
+        ASSERT_NO_FATAL_FAILURE(flush_session());
+    }
+    ASSERT_EQ(streams[r1.value()].response->status_code(), 200);
+
+    // Replace callbacks with a NEW handler that uses a different arg.
+    // This proves that subsequent events are routed through the updated callbacks
+    // and not the original ones.
+    struct NewCtx {
+        Http3Client *self;
+        bool on_response_called = false;
+    } new_ctx{this};
+
+    ag::http::Http3Client::Callbacks new_handler{
+            .arg = &new_ctx,
+            .on_response =
+                    [](void *arg, uint64_t stream_id, ag::http::Response response) {
+                        auto *ctx = static_cast<NewCtx *>(arg);
+                        ctx->on_response_called = true;
+                        on_response(ctx->self, stream_id, std::move(response));
+                    },
+            .on_body =
+                    [](void *arg, uint64_t stream_id, ag::Uint8View chunk) {
+                        on_body(static_cast<NewCtx *>(arg)->self, stream_id, chunk);
+                    },
+            .on_output =
+                    [](void *arg, const ag::http::QuicNetworkPath &path, ag::Uint8View chunk) {
+                        on_output(static_cast<NewCtx *>(arg)->self, path, chunk);
+                    },
+            .on_expiry_update =
+                    [](void *arg, ag::Nanos period) {
+                        on_expiry_update(static_cast<NewCtx *>(arg)->self, period);
+                    },
+    };
+    session->update_callbacks(new_handler);
+
+    // Second request — must be handled entirely by the new callbacks.
+    ag::Result r2 = session->submit_request(request, true);
+    ASSERT_TRUE(r2.has_value()) << r2.error()->str();
+    streams[r2.value()] = {};
+    ASSERT_NO_FATAL_FAILURE(flush_session());
+
+    while (!streams[r2.value()].response.has_value()) {
+        ASSERT_NO_FATAL_FAILURE(wait_readable(ag::Secs{5}));
+        ASSERT_NO_FATAL_FAILURE(read_out_socket());
+        ASSERT_NO_FATAL_FAILURE(flush_session());
+    }
+    ASSERT_EQ(streams[r2.value()].response->status_code(), 200);
+    ASSERT_TRUE(new_ctx.on_response_called) << "on_response was not routed through updated callbacks";
+
+    // Restore original callbacks so that TearDown()
+    session->update_callbacks(handler);
+}
+
+TEST(Http3FlushImpl, AllInitialPacketsSentWithPqClientHello) {
+#ifdef _WIN32
+    WSADATA wsa_data = {};
+    ASSERT_EQ(0, WSAStartup(MAKEWORD(2, 2), &wsa_data));
+#endif
+
+    ServerSide server_side;
+    ASSERT_NO_FATAL_FAILURE(server_side.run());
+
+    ag::SocketAddress bound_addr{"127.0.0.1:0"};
+
+    ag::UniquePtr<SSL_CTX, &SSL_CTX_free> ssl_ctx{SSL_CTX_new(TLS_server_method())};
+    ASSERT_NE(ssl_ctx, nullptr) << ERR_error_string(ERR_get_error(), nullptr);
+#ifdef OPENSSL_IS_BORINGSSL
+    ASSERT_EQ(0, ngtcp2_crypto_boringssl_configure_client_context(ssl_ctx.get()));
+#else
+    ASSERT_EQ(0, ngtcp2_crypto_quictls_configure_client_context(ssl_ctx.get()));
+#endif
+
+    ag::UniquePtr<SSL, &SSL_free> ssl{SSL_new(ssl_ctx.get())};
+    ASSERT_NE(ssl, nullptr);
+    static constexpr std::string_view ALPN = NGHTTP3_ALPN_H3;
+    ASSERT_EQ(0, SSL_set_alpn_protos(ssl.get(), (const uint8_t *) ALPN.data(), ALPN.size()));
+    SSL_set_tlsext_host_name(ssl.get(), SERVER_NAME);
+    SSL_set_connect_state(ssl.get());
+
+#ifdef OPENSSL_IS_BORINGSSL
+    // X25519MLKEM768 key share adds ~1184 bytes to ClientHello, pushing the
+    // TLS record beyond a single 1200-byte QUIC Initial packet.
+    static constexpr uint16_t PQ_GROUPS[] = {SSL_GROUP_X25519_MLKEM768, SSL_GROUP_X25519};
+    SSL_set1_group_ids(ssl.get(), PQ_GROUPS, std::size(PQ_GROUPS));
+#endif
+
+    evutil_socket_t fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ASSERT_GE(fd, 0) << strerror(errno);
+    ASSERT_EQ(0, bind(fd, bound_addr.c_sockaddr(), bound_addr.c_socklen()))
+            << evutil_socket_error_to_string(evutil_socket_geterror(fd));
+    bound_addr = ag::utils::get_local_address(fd).value();
+
+    struct Ctx {
+        evutil_socket_t fd;
+        ag::SocketAddress bound_addr;
+        int output_count = 0;
+    } ctx{fd, bound_addr};
+
+    ag::http::Http3Client::Callbacks handler{
+            .arg = &ctx,
+            .on_output =
+                    [](void *arg, const ag::http::QuicNetworkPath &path, ag::Uint8View chunk) {
+                        auto *c = (Ctx *) arg;
+                        ++c->output_count;
+                        sendto(c->fd, (const char *) chunk.data(), (int) chunk.size(), 0, path.remote, path.remote_len);
+                    },
+    };
+
+    ag::Result make_result = ag::http::Http3Client::connect(ag::http::Http3Settings{}, handler,
+            ag::http::QuicNetworkPath{
+                    .local = bound_addr.c_sockaddr(),
+                    .local_len = bound_addr.c_socklen(),
+                    .remote = server_side.bound_address().c_sockaddr(),
+                    .remote_len = server_side.bound_address().c_socklen(),
+            },
+            std::move(ssl));
+    ASSERT_FALSE(make_result.has_error()) << make_result.error()->str();
+    auto session = std::move(make_result.value());
+
+    ASSERT_EQ(nullptr, session->flush());
+
+    // With PQ groups enabled, ClientHello spans >= 2 Initial packets.
+    // Without the fix, only 1 packet would be delivered to on_output.
+#ifdef OPENSSL_IS_BORINGSSL
+    EXPECT_GE(ctx.output_count, 2) << "flush_impl() stopped after the first Initial packet; "
+                                      "subsequent packets were silently dropped (goto-exit regression)";
+#else
+    EXPECT_GE(ctx.output_count, 1);
+#endif
+
+    evutil_closesocket(fd);
+    server_side.stop();
 }

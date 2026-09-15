@@ -9,18 +9,19 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #else
-#include <netdb.h>
 #include <fcntl.h>
+#include <netdb.h>
 #endif
 
 #include <event2/event.h>
+#include <event2/thread.h>
 #include <event2/util.h>
 #include <gtest/gtest.h>
 #include <openssl/bio.h>
+#include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#include <openssl/err.h>
 
 #ifdef OPENSSL_IS_BORINGSSL
 #include <ngtcp2/ngtcp2_crypto_boringssl.h>
@@ -66,6 +67,20 @@ static const ag::UniquePtr<EVP_PKEY, &EVP_PKEY_free> PRIVATE_KEY = []() {
 
 static ag::Logger logger("!SERV");
 static thread_local uint8_t socket_buffer[2 * 1024];
+
+// The server runs its event_base in a dedicated worker thread, while ServerSide::stop() wakes it up with
+// event_base_loopexit() from the main thread. That cross-thread wakeup only works on a notifiable base, which
+// libevent sets up automatically when threading support is enabled before the base is created. This runs at load
+// time (before any base is created), so every event_base in the tests becomes safe to wake from another thread.
+[[maybe_unused]] static const int g_evthread_initialized = []() {
+#ifdef _WIN32
+    WSADATA wsa_data = {};
+    WSAStartup(MAKEWORD(2, 2), &wsa_data);
+    return evthread_use_windows_threads();
+#else
+    return evthread_use_pthreads();
+#endif
+}();
 
 enum ServerSide::State : int {
     STOPPED,
@@ -308,7 +323,7 @@ static void on_expiry_update(void *arg, ag::Nanos period) {
     auto *self = (Session *) arg;
     timeval tv{};
     tv.tv_sec = std::chrono::duration_cast<ag::Secs>(period).count();
-    tv.tv_usec = std::chrono::duration_cast<ag::Micros>(period).count() % 1000000;
+    tv.tv_usec = (decltype(tv.tv_usec)) (std::chrono::duration_cast<ag::Micros>(period).count() % 1000000);
     event_add(self->expiry_timer.get(), &tv);
 }
 

@@ -1,10 +1,10 @@
 # Native libs common stuff
 
-#### Prerequisites
+## Prerequisites
 
-* Conan C++ package manager 2.0.4 or higher
-* CMake 3.24 or higher
-* GCC 9 or higher / Clang 8 or higher
+- Conan C++ package manager 2.0.4 or higher
+- CMake 3.24 or higher
+- GCC 9 or higher / Clang 8 or higher
 
 ## Build
 
@@ -41,11 +41,50 @@ cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -GNinja \
     ..
 ```
 
+### Cross-compiling with zig
+
+[zig](https://ziglang.org/) can be used as a self-contained cross-compiler via its `cc` / `c++`
+subcommands, which removes the need for a separate cross toolchain:
+
+```shell
+mkdir build && cd build
+cmake -DCMAKE_C_COMPILER="zig;cc;-target;x86_64-linux-musl" \
+    -DCMAKE_CXX_COMPILER="zig;c++;-target;x86_64-linux-musl" \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_SYSTEM_NAME=Linux \
+    -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+    -DCMAKE_CROSSCOMPILING=ON \
+    -GNinja \
+    ..
+```
+
+`CMAKE_SYSTEM_PROCESSOR` must match the `-target` architecture: it is the only source for the Conan
+`arch` setting. Without it, `arch` is inherited from the build machine's default profile, and Conan
+would resolve dependencies for the host architecture while zig compiles for the target.
+
+The compiler must be passed as a CMake list (`zig;cc;-target;...`), since `zig cc` is a subcommand
+rather than a standalone binary. Conan's `compiler_executables` accepts only an argument-less
+executable, so `cmake/conan_provider.cmake` detects this form and generates wrapper scripts in
+`${CMAKE_BINARY_DIR}/zig-wrappers/` that re-attach the subcommand and target, then points the Conan
+profile at those. The wrappers are named after the target triple, following the usual cross-toolchain
+convention, so build systems that infer cross-compilation from the compiler name recognise them:
+
+```text
+zig-wrappers/x86_64-linux-musl-cc
+zig-wrappers/x86_64-linux-musl-c++
+```
+
+Two settings distinguish zig builds from ordinary ones:
+
+- `compiler.libcxx` is left out of the profile, as zig supplies its own libc++ per target.
+- `os.ag_cc_is_zig=1` is added, so packages built with zig get their own package ID instead of
+  colliding with packages built by a plain clang of the same version.
+
 Currently, it contains Conan recipes for AdGuard libs
 
 ## Testing
 
-#### Build All Tests
+### Build All Tests
 
 ```shell
 # Configure the project (if not done already)
@@ -55,14 +94,14 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --target tests
 ```
 
-#### Run All Tests
+### Run All Tests
 
 ```shell
 # Run all tests using CTest
 ctest --test-dir build --verbose
 ```
 
-#### Run Specific Tests
+### Run Specific Tests
 
 ```shell
 # Run a specific test executable directly
@@ -86,7 +125,7 @@ conan remote add --index 0 $REMOTE_NAME https://$ARTIFACTORY_HOST/artifactory/ap
 We customized some packages, so they need to be exported to local conan repository.
 
 ```shell
-./scripts/export_conan.py
+./scripts/export_conan.sh
 ```
 
 If you want to upload built binaries and recipes to conan remote repository, use following command:
@@ -101,20 +140,26 @@ If you want to upload exported only recipes to conan remote repository, use foll
 conan upload -r $REMOTE_NAME -c '*' --only-recipe
 ```
 
-
 ## Testing changes as a dependency
 
-To test local changes in the library when it is used as a Conan package dependency,
-do the following:
+To test local changes in the library when it is used as a Conan package
+dependency, export a recipe and point the dependent project at it. Use
+`conan export` (not `conan create`) so the package is built later with the
+dependent project's target profile rather than the default one.
 
 1) If the default `vcs_url` in `<root>/conanfile.py` is not suitable, change it accordingly.
-2) Commit the changes you wish to test.
-3) Execute `./script/export_conan.py local`. This script will export the package, assigning the last commit hash as its version.
-4) In the project that depends on `native_libs_common`, update the version to `<commit_hash>` (where `<commit_hash>` is the hash of the target commit):
-Replace `native_libs_common/1.0.0@adguard/oss` with `native_libs_common/<commit_hash>@adguard/oss`.
-5) Re-run the cmake command.
-   Note:
-    * If you have already exported the library in this way, the cached version must be purged: `conan remove -f native_libs_common/<commit_hash>`.
+2) Export the current working tree as version `local` (the recipe stages the
+   git-tracked working tree, so no commit or push is required):
+
+   ```shell
+   conan export . --version local
+   ```
+
+3) In the dependent project, replace `native_libs_common/1.0.0@adguard/oss` with
+   `native_libs_common/local`.
+4) Re-run the cmake command; the package is built with that project's profile.
+   Note: after further changes, purge the cached copy before re-exporting:
+   `conan remove -c "native_libs_common/local"`.
 
 ## Code style
 
@@ -122,21 +167,23 @@ Replace `native_libs_common/1.0.0@adguard/oss` with `native_libs_common/<commit_
 
 1. Indentation is 4 spaces (imported files may have another indent).
 2. Code must be commented enough in terms of control flow. All public and big static methods should have a description in Doxygen format (`/** */`)
-3. Formatting rules. We use CLion basic rules. They are based on LLVM and Apple rules, and applies 4 spaces indentation by default. 
+3. Formatting rules. We use CLion basic rules. They are based on LLVM and Apple rules, and applies 4 spaces indentation by default.
    But there are also rules not related to indentation:
     - Binary operator are always separated by spaces from their operands (x + y)
     - Screen width: 120 symbols (not 80)
     - In function definition, operator block is started on function line `int main(int argc, char **argv) {`.
       However, `int func() try {` is prohibited.
       If it makes harder to read the code, next line may be empty:
-      ```
+
+      ```c++
           int very_long_function_definition(
                   int foo1234567890, int bar9876543210, int baz9999999999, 
                   int x4242424242, int y1010101010, int z0101010101) noexcept {
 
               do_smth();
           }
-      ```     
+      ```
+
     - In loops and ifs, operator block is started on function line too. Single-line branches should be in operator braces too.
 4. Identifier prefixes other than `p_`, `m_`, `g_` and `_` is prohibited
 5. Don't use `p` prefix unless it is really needed. In most cases type of identifier says what is it.
@@ -147,6 +194,7 @@ Replace `native_libs_common/1.0.0@adguard/oss` with `native_libs_common/<commit_
 No new C code please.
 
 ### C++
+
 1. Language standard - C++20 (-std=c++20)
 2. Class prefixes - use namespaces instead.
 3. Namespaces - root namespace is ag::, max depth is 2 (plus may be ::test).
@@ -169,7 +217,7 @@ No new C code please.
 
 Code example:
 
-```
+```c++
 #pragma once
 
 #include <string>
@@ -188,7 +236,7 @@ namespace ag::utils {
 
 ```
 
-```
+```c++
 #include <string>
 
 #include "common/utils.h"
@@ -207,6 +255,7 @@ namespace ag::utils {
 ```
 
 ### Doxygen comments
+
 - All public methods and functions should be documented.
 - Use Javadoc style with an `autobrief` feature.
 - `autobrief` means that the first statement of a long description automatically becomes a brief description.
@@ -219,7 +268,8 @@ namespace ag::utils {
 - Descriptions should start with a capital letter.
 
 Examples:
-```
+
+```c++
 /**
  * Sum of x and y.
  * This function is usually used to get sum of x and y.

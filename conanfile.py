@@ -1,8 +1,9 @@
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import patch, copy
+from conan.tools.files import copy
+from conan.tools.scm import Git
 from os.path import join
-import re
+import re, os, shutil
 
 required_conan_version = ">=1.53.0"
 
@@ -22,24 +23,19 @@ class NativeLibsCommon(ConanFile):
         "shared": False,
         "fPIC": True,
     }
-    # A list of paths to patches. The paths must be relative to the conanfile directory.
-    # They are applied in case of the version equals 777 and mostly intended to be used
-    # for testing.
-    patch_files = []
-    exports_sources = patch_files
-
     def requirements(self):
+        self.requires("brotli/1.1.0", transitive_headers=True)
         self.requires("fmt/12.1.0", transitive_headers=True)
         self.requires("libevent/2.1.11@adguard/oss", transitive_headers=True)
-        self.requires("llhttp/9.1.3@adguard/oss", transitive_headers=True)
+        self.requires("llhttp/9.3.0@adguard/oss", transitive_headers=True)
         self.requires("magic_enum/0.9.5", transitive_headers=True)
         self.requires("nghttp2/1.56.0@adguard/oss", transitive_headers=True)
         self.requires("nghttp3/1.0.0@adguard/oss", transitive_headers=True)
-        self.requires("ngtcp2/1.0.1@adguard/oss", transitive_headers=True)
+        self.requires("ngtcp2/1.22.1@adguard/oss", transitive_headers=True)
         if "mips" in str(self.settings.arch):
             self.requires("openssl/3.1.5-quic1@adguard/oss", transitive_headers=True, force=True)
         else:
-            self.requires("openssl/boring-2024-09-13@adguard/oss", transitive_headers=True)
+            self.requires("openssl/boring-2026-05-08@adguard/oss", transitive_headers=True)
         self.requires("pcre2/10.37@adguard/oss", transitive_headers=True)
 
     def build_requirements(self):
@@ -55,18 +51,33 @@ class NativeLibsCommon(ConanFile):
         if self.settings.os == "Windows":
             del self.options.fPIC
 
+    def export_sources(self):
+        # `conan create . --version local` builds from the working tree instead of
+        # fetching a tag (there is no "vlocal" tag). Copy the git-tracked files into
+        # the exported sources so source() can pick them up and skip the clone.
+        if self.version == "local":
+            git = Git(self)
+            for i in git.included_files():
+                dst = os.path.join(self.export_sources_folder, i)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(i, dst)
+
     def source(self):
-        self.run(f"git init . && git remote add origin {self.vcs_url} && git fetch --tags")
-        if re.match(r'\d+\.\d+\.\d+', self.version) is not None:
-            # Use git tag for versioned releases
-            self.run("git checkout -f v%s" % self.version)
-        else:
-            self.run("git checkout -f %s" % self.version)
-        for p in self.patch_files:
-            patch(self, patch_file=p)
+        # Local export: the working tree was already staged by export_sources().
+        if os.listdir(self.source_folder):
+            return
+        version = str(self.version)
+        # A "git describe" version looks like "<tag>-<n>-g<rev>"; check out the
+        # commit after "-g". Any other version is a release tag "v<version>".
+        described = re.search(r"-g([0-9a-f]+)$", version)
+        ref = described.group(1) if described else "v%s" % version
+        git = Git(self)
+        git.clone(url=self.vcs_url, target=".")
+        git.checkout(ref)
 
     def generate(self):
         tc = CMakeToolchain(self)
+        tc.user_presets_path = False
         tc.generate()
         deps = CMakeDeps(self)
         deps.generate()
@@ -93,6 +104,7 @@ class NativeLibsCommon(ConanFile):
         self.cpp_info.libs = ["ag_common", "ag_common_http", "ag_common_tls"]
         self.cpp_info.libdirs = ["lib"]
         self.cpp_info.requires = [
+            "brotli::brotli",
             "fmt::fmt",
             "libevent::libevent",
             "llhttp::llhttp",

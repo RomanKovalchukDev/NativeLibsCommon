@@ -21,8 +21,8 @@ std::string utils::generate_uuid() {
         uint16_t short_parts[8];
     } uuid_parts{};
 
-    for (size_t i = 0; i < sizeof(uuid_parts)/sizeof(uint32_t); i++) {
-        uuid_parts.int_parts[i] = (uint32_t)rng();
+    for (size_t i = 0; i < sizeof(uuid_parts) / sizeof(uint32_t); i++) {
+        uuid_parts.int_parts[i] = (uint32_t) rng();
     }
 
     // set version to 4
@@ -33,13 +33,13 @@ std::string utils::generate_uuid() {
     uuid_parts.short_parts[4] &= 0x3fff;
     uuid_parts.short_parts[4] |= 0x8000;
 
-    return AG_FMT("{:04x}{:04x}-{:04x}-{:04x}-{:04x}-{:04x}{:04x}{:04x}",
-            uuid_parts.short_parts[0], uuid_parts.short_parts[1],
-            uuid_parts.short_parts[2], uuid_parts.short_parts[3], uuid_parts.short_parts[4],
+    return AG_FMT("{:04x}{:04x}-{:04x}-{:04x}-{:04x}-{:04x}{:04x}{:04x}", uuid_parts.short_parts[0],
+            uuid_parts.short_parts[1], uuid_parts.short_parts[2], uuid_parts.short_parts[3], uuid_parts.short_parts[4],
             uuid_parts.short_parts[5], uuid_parts.short_parts[6], uuid_parts.short_parts[7]);
 }
 
-std::vector<std::string_view> utils::split_by(std::string_view str, std::string_view delim, bool include_empty, bool need_trim) {
+std::vector<std::string_view> utils::split_by(
+        std::string_view str, std::string_view delim, bool include_empty, bool need_trim) {
     if (str.empty()) {
         return include_empty ? std::vector{str} : std::vector<std::string_view>{};
     }
@@ -87,12 +87,13 @@ std::vector<std::string_view> utils::split_by(std::string_view str, int delim, b
     return split_by_any_of(str, {&ch, 1}, include_empty, need_trim);
 }
 
-std::vector<std::string_view> utils::split_by_any_of(std::string_view str, std::string_view delim, bool include_empty, bool need_trim) {
+std::vector<std::string_view> utils::split_by_any_of(
+        std::string_view str, std::string_view delim, bool include_empty, bool need_trim) {
     if (str.empty()) {
         return include_empty ? std::vector{str} : std::vector<std::string_view>{};
     }
 
-    size_t num = 1 + std::count_if(str.begin(), str.end(), [&delim](int c) {
+    size_t num = 1 + std::count_if(str.begin(), str.end(), [&delim](char c) {
         return delim.find(c) != delim.npos;
     });
     size_t seek = 0;
@@ -121,7 +122,8 @@ std::vector<std::string_view> utils::split_by_any_of(std::string_view str, std::
     return out;
 }
 
-static std::array<std::string_view, 2> split2(std::string_view str, std::string_view delim, bool reverse, bool need_trim) {
+static std::array<std::string_view, 2> split2(
+        std::string_view str, std::string_view delim, bool reverse, bool need_trim) {
     std::string_view first;
     std::string_view second;
 
@@ -167,10 +169,13 @@ bool utils::is_valid_ip6(std::string_view str) {
 }
 
 std::wstring utils::to_wstring(std::string_view sv) {
+    // std::codecvt_utf8 is deprecated in C++17 but has no standard replacement yet.
+    // NOLINTNEXTLINE(clang-diagnostic-deprecated-declarations)
     return std::wstring_convert<std::codecvt_utf8<wchar_t>>().from_bytes(sv.data(), sv.data() + sv.size());
 }
 
 std::string utils::from_wstring(std::wstring_view wsv) {
+    // NOLINTNEXTLINE(clang-diagnostic-deprecated-declarations)
     return std::wstring_convert<std::codecvt_utf8<wchar_t>>().to_bytes(wsv.data(), wsv.data() + wsv.size());
 }
 
@@ -227,10 +232,11 @@ uint32_t utils::gettid(void) {
 
 #ifdef __MACH__
 #include <pthread.h>
-uint32_t utils::gettid(void) {
+uint32_t utils::gettid() {
     uint64_t tid;
-    if (0 != pthread_threadid_np(NULL, &tid))
+    if (0 != pthread_threadid_np(nullptr, &tid)) {
         return 0;
+    }
     return (uint32_t) tid;
 }
 #endif //__MACH__
@@ -243,7 +249,6 @@ uint32_t utils::gettid(void) {
     return GetCurrentThreadId();
 }
 #endif // _WIN32
-
 
 std::string utils::encode_to_hex(Uint8View data) {
     static constexpr char TABLE[] = "0123456789abcdef";

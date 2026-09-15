@@ -18,6 +18,146 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+## [8.1.50] - 2026-08-24
+
+### Changed
+
+- BoringSSL is updated from the `0.20240913.0` tag to `0.20260508.0`, primarily to pick up upstream ML-DSA support. The Conan package reference changes from `openssl/boring-2024-09-13@adguard/oss` to `openssl/boring-2026-05-08@adguard/oss` in the top-level `conanfile.py` and in the `libevent` and `ngtcp2-1.22.1` recipes.
+
+### Fixed
+
+- `TlsClientProfile::FIREFOX`: the TLS 1.2 cipher list is now emitted in NSS's own order instead of a tidied one. JA4 sorts the cipher list before hashing, so the JA4 is unchanged, but JA3 and byte-exact comparison against a real Firefox ClientHello now match.
+
+## [8.1.49] - 2026-08-10
+
+## [8.1.48] - 2026-07-30
+
+### Changed
+
+- HTTP/3: `Http3Client::consume_stream()` and `Http3Server::consume_stream()` no longer extend the connection-level flow control window. The session now extends it itself as soon as the body data is passed to `Handler::on_body`, the same way `Http2Session.
+
+### Fixed
+
+- HTTP/3: report an error from `nghttp3_conn_read_stream()` to ngtcp2 again. The escalation was dropped by accident in 8.1.37, so a peer that violates the HTTP/3 framing left the connection stuck instead of failing it.
+
+## [8.1.47] - 2026-07-28
+
+### Added
+
+- New `make_ssl` ClientHello profile `TlsClientProfile::CHROME_CANARY`, reproducing the Chrome 152 (canary) ClientHello.
+- New BoringSSL patch `21_chrome_canary_extensions`, adding the client-side `server_padding` extension (codepoint `4832`) via `SSL_set_server_padding_request`, a signature_algorithms GREASE toggle via `SSL_set_grease_sigalgs_enabled`, and the `trust_anchors` extension (draft-ietf-tls-trust-anchor-ids, provisional codepoint `0xca34`) via `SSL_set1_requested_trust_anchors`.
+- `ag::println()` in `common/format.h` — the newline-appending counterpart of `ag::print()`, with the same strict format string checking (`fmt::println()` only checks that enough arguments are passed, not that there are no extra ones).
+
+### Changed
+
+- `TlsClientProfile::CHROME` now tracks Chrome 150 instead of Chrome 149, since 150 is the current stable release.
+
+### Fixed
+
+- `make_ssl()` no longer crashes when `SslInitParameters::sni` is left at its default `nullptr`.
+
+## [8.1.46] - 2026-07-24
+
+### Changed
+
+- Bump `ag_profile_version` from `"2"` to `"3"` in `conan/settings_user.yml` and all `.jinja` profiles. Cached Conan packages needed to be invalidated for several reasons: hard-float code for armv7 had crept into the cache while the project uses soft-float; the profile was not bumped after the Xcode 26.4.1 upgrade; and the MSVC version on GitHub Actions differs slightly from the Bamboo builder (though not enough to be considered a different profile).
+
+## [8.1.45] - 2026-07-23
+
+### Changed
+
+- Update docker image to core-libs:2.12.
+- The `musl-cross` CMake presets now cross-compile with `zig cc -target ...` instead of an external `/opt/cross` musl-gcc toolchain, and cover `x86_64`, `aarch64`, `arm`, `mips` and `mipsel`.
+- `CMAKE_C_COMPILER`/`CMAKE_CXX_COMPILER` are replaced by the generated zig wrapper script for the `musl-cross` presets, so that compiler launchers (`sccache`, `ccache`) work with them. Existing `musl-cross` build directories have to be deleted once, as the compiler path changes.
+
+## [8.1.44] - 2026-07-15
+
+### Added
+
+- Add `make_ssl` function that supports different ClientHello profiles (Chrome, Firefox etc.).
+
+### Fixed
+
+- OpenSSL now builds for 32-bit mips when compiled with zig. `crypto/threads_pthread.c` calls `__atomic_is_lock_free()` on `uint64_t`, which mips32 cannot do lock-free, so clang emits a libcall instead of folding it to a constant. zig's compiler-rt does not implement that symbol and zig ships no libatomic, so linking `fips.so`/`legacy.so` failed with `undefined symbol: __atomic_is_lock_free`. The recipe now defines `BROKEN_CLANG_ATOMICS` for zig builds on mips, selecting OpenSSL's lock-based fallback.
+
+## [8.1.43] - 2026-07-15
+
+### Added
+
+- Support for using zig as a cross-compiler: when the C/C++ compiler is given as `zig;cc;-target;...`, `cmake/conan_provider.cmake` now generates wrapper scripts that re-attach the subcommand and target, and passes those to Conan via `tools.build:compiler_executables`. The wrappers are named after the target triple (`x86_64-linux-musl-cc`, `x86_64-linux-musl-c++`) so build systems that infer cross-compilation from the compiler name detect it. `compiler.libcxx` is omitted from the generated profile for zig builds.
+- New custom setting `os.ag_cc_is_zig` (`None`, `1`) in `conan/settings_user.yml`, set to `1` in the generated profile for zig builds so their packages don't share a package ID with packages built by a plain clang of the same version.
+
+## [8.1.42] - 2026-07-10
+
+### Fixed
+
+- Windows: `win_detect_active_if()` no longer compares interface metrics across address families, which on dual-stack hosts could pin an IPv6-only-default interface for IPv4 sockets and break all IPv4 connections. It now prefers the interface with an IPv4 default route, falling back to the IPv6 one (AG-56159).
+
+## [8.1.41] - 2026-07-10
+
+### Fixed
+
+- ngtcp2 build with quictls on MIPS.
+
+## [8.1.40] - 2026-07-08
+
+### Changed
+
+- Ignore duplicate HTTP/2 `SETTINGS` ACK frames from non-conforming servers (e.g., `www.alba.co.kr`) instead of terminating the connection with `PROTOCOL_ERROR`.
+
+## [8.1.39] - 2026-07-04
+
+### Added
+
+- Add `Http3Settings::quic_version` to let the HTTP/3 client choose the offered QUIC version
+
+### Changed
+
+- HTTP/3 server now answers with the QUIC version chosen by the client instead of a fixed one
+
+## [8.1.38] - 2026-06-29
+
+### Added
+
+- Add HTTP/3 flow-control window auto-tuning and get_stream_send_capacity
+
+## [8.1.37] - 2026-06-26
+
+### Added
+
+- Support RFC 10008 HTTP `QUERY` method in llhttp.
+- Add custom Conan recipe for llhttp 9.3.0 with AdGuard-specific patches.
+
+### Changed
+
+- Bump llhttp from `9.1.3` to `9.3.0`.
+- Apply lenient parsing flags explicitly in `http/http1.cpp` instead of patching llhttp defaults.
+- Treat `205 Reset Content` responses as bodyless via `0001-status-205-no-body.patch`.
+- Allow `+`, `-`, `.`, and digits in URL schemes via `0002-url-scheme.patch`.
+
+### Fixed
+
+- Keep the QUIC connection alive on stream-level HTTP/3 errors instead of tearing down the whole connection
+- Fix HTTP/3 send-buffer aliasing in `push_data`: hand ngtcp2 a stable owned buffer via `evbuffer_add_reference` so retained pointers stay valid until the data is acknowledged
+
+## [8.1.36] - 2026-06-24
+
+## [8.1.35] - 2026-06-16
+
+### Changed
+
+- Changed GH actions workflows
+
+## [8.1.34] - 2026-06-10
+
+### Changed
+
+- Use ngtcp2-1.22.1
+
+### Fixed
+
+- Fix flush_impl prematurely exiting send loop after non-stream packets
+
 ## [8.1.33] - 2026-06-03
 
 ### Added
@@ -372,7 +512,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- Add missing <optional> include to logger.h
+- Add missing `<optional>` include to logger.h
 
 ## [7.0.19] - 2025-04-17
 
@@ -510,7 +650,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Fix missing <functional> header
+- Fix missing `<functional>` header
 
 ## [6.1.12] - 2024-08-27
 
@@ -1142,7 +1282,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Introduce Error class
 
-[Unreleased]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.33...HEAD
+[Unreleased]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.50...HEAD
+[8.1.50]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.49...v8.1.50
+[8.1.49]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.48...v8.1.49
+[8.1.48]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.47...v8.1.48
+[8.1.47]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.46...v8.1.47
+[8.1.46]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.45...v8.1.46
+[8.1.45]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.44...v8.1.45
+[8.1.44]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.43...v8.1.44
+[8.1.43]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.42...v8.1.43
+[8.1.42]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.41...v8.1.42
+[8.1.41]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.40...v8.1.41
+[8.1.40]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.39...v8.1.40
+[8.1.39]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.38...v8.1.39
+[8.1.38]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.37...v8.1.38
+[8.1.37]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.36...v8.1.37
+[8.1.36]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.35...v8.1.36
+[8.1.35]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.34...v8.1.35
+[8.1.34]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.33...v8.1.34
 [8.1.33]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.32...v8.1.33
 [8.1.32]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.31...v8.1.32
 [8.1.31]: https://github.com/AdguardTeam/NativeLibsCommon/compare/v8.1.30...v8.1.31

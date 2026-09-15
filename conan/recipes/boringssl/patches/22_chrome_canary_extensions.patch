@@ -1,0 +1,320 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 47ab65b..761f162 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -3074,6 +3074,33 @@ OPENSSL_EXPORT void SSL_set_delegated_credentials(SSL *ssl, const uint16_t *pref
+ // browser's ClientHello extension sequence.
+ OPENSSL_EXPORT void SSL_set_extension_order(SSL *ssl, const uint16_t *ids,
+                                             size_t num);
++
++// The trust_anchors ClientHello extension (draft-ietf-tls-trust-anchor-ids) and
++// |SSL_set1_requested_trust_anchors| are implemented upstream as of BoringSSL
++// 0.20260508.0; see the declaration further down in this header.
++
++#define SSL_set_server_padding_request SSL_set_server_padding_request
++
++// SSL_set_server_padding_request advertises the server_padding ClientHello
++// extension, asking the server to add |padding| bytes of padding to
++// EncryptedExtensions. The extension_data is |padding| as a big-endian
++// uint16_t.
++//
++// This is advertise-only: BoringSSL ignores whatever the server does in
++// response. It exists to reproduce Chrome's ClientHello.
++OPENSSL_EXPORT void SSL_set_server_padding_request(SSL *ssl, uint16_t padding);
++
++#define SSL_set_grease_sigalgs_enabled SSL_set_grease_sigalgs_enabled
++
++// SSL_set_grease_sigalgs_enabled configures |ssl| to prepend a GREASE value
++// (RFC 8701) to the signature_algorithms ClientHello extension. The GREASE
++// value is advertised only; it is never added to the set of signature
++// algorithms |ssl| will actually accept from the peer.
++//
++// Note: upstream BoringSSL later added this as an |SSL_CTX|-level toggle named
++// |SSL_CTX_set_grease_sigalgs_enabled|. This per-|SSL| spelling is local to
++// patch stack and should be reconciled if BoringSSL is updated.
++OPENSSL_EXPORT void SSL_set_grease_sigalgs_enabled(SSL *ssl, int enabled);
+ // SSL_set_encrypt_then_mac configures whether |ssl| advertises the (empty)
+ // encrypt_then_mac ClientHello extension (RFC 7366). This is advertise-only for
+ // ClientHello fingerprinting; BoringSSL does not implement Encrypt-then-MAC.
+diff --git a/include/openssl/tls1.h b/include/openssl/tls1.h
+index c1ceee3..4ff18b4 100644
+--- a/include/openssl/tls1.h
++++ b/include/openssl/tls1.h
+@@ -99,6 +99,10 @@ extern "C" {
+ // ExtensionType value from RFC 8449
+ #define TLSEXT_TYPE_record_size_limit 28
+ 
++// Extension allowing the client to ask the server to add additional bytes of
++// padding to EncryptedExtensions. This is not an IANA defined extension number.
++#define TLSEXT_TYPE_server_padding 4832
++
+ // ExtensionType value from RFC 4507
+ #define TLSEXT_TYPE_session_ticket 35
+ 
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index d74d013..93ba602 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -1031,8 +1031,20 @@ static bool ext_sigalgs_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+   CBB contents, sigalgs_cbb;
+   if (!CBB_add_u16(out_compressible, TLSEXT_TYPE_signature_algorithms) ||
+       !CBB_add_u16_length_prefixed(out_compressible, &contents) ||
+-      !CBB_add_u16_length_prefixed(&contents, &sigalgs_cbb) ||
+-      !tls12_add_verify_sigalgs(hs, &sigalgs_cbb) ||
++      !CBB_add_u16_length_prefixed(&contents, &sigalgs_cbb)) {
++    return false;
++  }
++
++  // Chrome 152 and newer prepend a GREASE value to signature_algorithms. It is
++  // only ever written here, in the ClientHello, and is deliberately not added to
++  // the accepted set returned by |tls12_get_verify_sigalgs|, so a server that
++  // echoed it back would still be rejected.
++  if (hs->config->grease_sigalgs_enabled &&
++      !CBB_add_u16(&sigalgs_cbb, ssl_get_grease_value(hs, ssl_grease_sigalg))) {
++    return false;
++  }
++
++  if (!tls12_add_verify_sigalgs(hs, &sigalgs_cbb) ||
+       !CBB_flush(out_compressible)) {
+     return false;
+   }
+@@ -4042,6 +4054,44 @@ static bool ext_encrypt_then_mac_add_serverhello(SSL_HANDSHAKE *hs, CBB *out) {
+   return true;
+ }
+ 
++// server_padding.
++//
++// Asks the server to add padding bytes to EncryptedExtensions. Client-side and
++// advertise-only: the request is written into the ClientHello, and whatever the
++// server does in response is ignored.
++static bool ext_server_padding_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
++                                               CBB *out_compressible,
++                                               ssl_client_hello_type_t type) {
++  if (!hs->config->server_padding_enabled) {
++    return true;
++  }
++
++  CBB contents;
++  if (!CBB_add_u16(out_compressible, TLSEXT_TYPE_server_padding) ||
++      !CBB_add_u16_length_prefixed(out_compressible, &contents) ||
++      !CBB_add_u16(&contents, hs->config->server_padding_request) ||
++      !CBB_flush(out_compressible)) {
++    return false;
++  }
++  return true;
++}
++
++static bool ext_server_padding_parse_serverhello(SSL_HANDSHAKE *hs,
++                                                 uint8_t *out_alert,
++                                                 CBS *contents) {
++  return true;
++}
++
++static bool ext_server_padding_parse_clienthello(SSL_HANDSHAKE *hs,
++                                                 uint8_t *out_alert,
++                                                 CBS *contents) {
++  return true;
++}
++
++static bool ext_server_padding_add_serverhello(SSL_HANDSHAKE *hs, CBB *out) {
++  return true;
++}
++
+ // kExtensions contains all the supported extensions.
+ static const struct tls_extension kExtensions[] = {
+     {
+@@ -4282,6 +4332,13 @@ static const struct tls_extension kExtensions[] = {
+         ext_record_size_limit_parse_clienthello,
+         ext_record_size_limit_add_serverhello,
+     },
++    {
++        TLSEXT_TYPE_server_padding,
++        ext_server_padding_add_clienthello,
++        ext_server_padding_parse_serverhello,
++        ext_server_padding_parse_clienthello,
++        ext_server_padding_add_serverhello,
++    },
+ };
+ 
+ #define kNumExtensions (sizeof(kExtensions) / sizeof(struct tls_extension))
+@@ -4435,7 +4492,7 @@ static bool ssl_add_clienthello_tlsext_inner(SSL_HANDSHAKE *hs, CBB *out,
+     // The callback may write to at most one output.
+     assert(bytes_written == 0 || bytes_written_compressed == 0);
+     if (bytes_written != 0 || bytes_written_compressed != 0) {
+-      hs->inner_extensions_sent |= (1u << i);
++      hs->inner_extensions_sent |= (UINT64_C(1) << i);
+     }
+     // If compressed, update the running ech_outer_extensions extension.
+     if (bytes_written_compressed != 0 &&
+@@ -4542,7 +4599,7 @@ bool ssl_add_clienthello_tlsext(SSL_HANDSHAKE *hs, CBB *out, CBB *out_encoded,
+ 
+     const size_t bytes_written = CBB_len(&extensions) - len_before;
+     if (bytes_written != 0) {
+-      hs->extensions.sent |= (1u << i);
++      hs->extensions.sent |= (UINT64_C(1) << i);
+     }
+     // If the difference in lengths is only four bytes then the extension had
+     // an empty body.
+@@ -4624,7 +4681,7 @@ bool ssl_add_serverhello_tlsext(SSL_HANDSHAKE *hs, CBB *out) {
+   }
+ 
+   for (unsigned i = 0; i < kNumExtensions; i++) {
+-    if (!(hs->extensions.received & (1u << i))) {
++    if (!(hs->extensions.received & (UINT64_C(1) << i))) {
+       // Don't send extensions that were not received.
+       continue;
+     }
+@@ -4673,7 +4730,7 @@ static bool ssl_scan_clienthello_tlsext(SSL_HANDSHAKE *hs,
+       continue;
+     }
+ 
+-    hs->extensions.received |= (1u << ext_index);
++    hs->extensions.received |= (UINT64_C(1) << ext_index);
+     uint8_t alert = SSL_AD_DECODE_ERROR;
+     if (!ext->parse_clienthello(hs, &alert, &extension)) {
+       *out_alert = alert;
+@@ -4684,7 +4741,7 @@ static bool ssl_scan_clienthello_tlsext(SSL_HANDSHAKE *hs,
+   }
+ 
+   for (size_t i = 0; i < kNumExtensions; i++) {
+-    if (hs->extensions.received & (1u << i)) {
++    if (hs->extensions.received & (UINT64_C(1) << i)) {
+       continue;
+     }
+ 
+@@ -4698,7 +4755,7 @@ static bool ssl_scan_clienthello_tlsext(SSL_HANDSHAKE *hs,
+       CBS_init(&fake_contents, kFakeRenegotiateExtension,
+                sizeof(kFakeRenegotiateExtension));
+       contents = &fake_contents;
+-      hs->extensions.received |= (1u << i);
++      hs->extensions.received |= (UINT64_C(1) << i);
+     }
+ 
+     // Extension wasn't observed so call the callback with a NULL
+@@ -4766,7 +4823,7 @@ static bool ssl_scan_serverhello_tlsext(SSL_HANDSHAKE *hs, const CBS *cbs,
+     static_assert(kNumExtensions <= sizeof(hs->extensions.sent) * 8,
+                   "too many bits");
+ 
+-    if (!(hs->extensions.sent & (1u << ext_index))) {
++    if (!(hs->extensions.sent & (UINT64_C(1) << ext_index))) {
+       // If the extension was never sent then it is illegal.
+       OPENSSL_PUT_ERROR(SSL, SSL_R_UNEXPECTED_EXTENSION);
+       ERR_add_error_dataf("extension %u", (unsigned)type);
+@@ -4774,7 +4831,7 @@ static bool ssl_scan_serverhello_tlsext(SSL_HANDSHAKE *hs, const CBS *cbs,
+       return false;
+     }
+ 
+-    received |= (1u << ext_index);
++    received |= (UINT64_C(1) << ext_index);
+ 
+     uint8_t alert = SSL_AD_DECODE_ERROR;
+     if (!ext->parse_serverhello(hs, &alert, &extension)) {
+@@ -4786,7 +4843,7 @@ static bool ssl_scan_serverhello_tlsext(SSL_HANDSHAKE *hs, const CBS *cbs,
+   }
+ 
+   for (size_t i = 0; i < kNumExtensions; i++) {
+-    if (!(received & (1u << i))) {
++    if (!(received & (UINT64_C(1) << i))) {
+       // Extension wasn't observed so call the callback with a NULL
+       // parameter.
+       uint8_t alert = SSL_AD_DECODE_ERROR;
+diff --git a/ssl/internal.h b/ssl/internal.h
+index e278922..86ea0a1 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -1678,7 +1678,8 @@ enum ssl_grease_index_t {
+   ssl_grease_version,
+   ssl_grease_ticket_extension,
+   ssl_grease_ech_config_id,
+-  ssl_grease_last_index = ssl_grease_ech_config_id,
++  ssl_grease_sigalg,
++  ssl_grease_last_index = ssl_grease_sigalg,
+ };
+ 
+ enum tls12_server_hs_state_t {
+@@ -1831,15 +1832,18 @@ struct SSL_HANDSHAKE {
+     // sent is a bitset where the bits correspond to elements of kExtensions
+     // in extensions.cc. Each bit is set if that extension was sent in a
+     // ClientHello. It's not used by servers.
+-    uint32_t sent = 0;
++    //
++    // Widened to 64 bits by AdGuard: the extensions AdGuard adds for
++    // browser imitation push |kNumExtensions| past 32.
++    uint64_t sent = 0;
+     // received is a bitset, like |sent|, but is used by servers to record
+     // which extensions were received from a client.
+-    uint32_t received;
++    uint64_t received;
+   } extensions;
+ 
+   // inner_extensions_sent, on clients that offer ECH, is |extensions.sent| for
+   // the ClientHelloInner.
+-  uint32_t inner_extensions_sent = 0;
++  uint64_t inner_extensions_sent = 0;
+ 
+   // error, if |wait| is |ssl_hs_error|, is the error the handshake failed on.
+   UniquePtr<ERR_SAVE_STATE> error;
+@@ -3482,6 +3486,10 @@ struct SSL_CONFIG {
+   // See |SSL_set_extension_order| and |ssl_setup_extension_permutation|.
+   Array<uint16_t> extension_order;
+ 
++  // server_padding_request, if |server_padding_enabled| is set, is the number of
++  // padding bytes requested in the server_padding ClientHello extension.
++  uint16_t server_padding_request = 0;
++
+   // encrypt_then_mac, if true, advertises the (empty) encrypt_then_mac
+   // ClientHello extension (RFC 7366). BoringSSL does not implement
+   // Encrypt-then-MAC record protection; this is advertise-only, to reproduce a
+@@ -3574,6 +3582,15 @@ struct SSL_CONFIG {
+   // alps_use_new_codepoint if set indicates we use new ALPS extension codepoint
+   // to negotiate and convey application settings.
+   bool alps_use_new_codepoint : 1;
++
++  // server_padding_enabled is whether to send the server_padding ClientHello
++  // extension carrying |server_padding_request|. A separate flag is used rather
++  // than a zero sentinel so that a request of zero bytes stays expressible.
++  bool server_padding_enabled : 1;
++
++  // grease_sigalgs_enabled is whether to prepend a GREASE value to the
++  // signature_algorithms ClientHello extension.
++  bool grease_sigalgs_enabled : 1;
+ };
+ 
+ // From RFC 8446, used in determining PSK modes.
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 4d6a73e..d6d2fc7 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -620,7 +620,9 @@ SSL_CONFIG::SSL_CONFIG(SSL *ssl_arg)
+       jdk11_workaround(false),
+       quic_use_legacy_codepoint(false),
+       permute_extensions(false),
+-      alps_use_new_codepoint(true) {
++      alps_use_new_codepoint(true),
++      server_padding_enabled(false),
++      grease_sigalgs_enabled(false) {
+   assert(ssl);
+ }
+ 
+@@ -2284,6 +2286,21 @@ void SSL_set_extension_order(SSL *ssl, const uint16_t *ids, size_t num) {
+   (void)ssl->config->extension_order.CopyFrom(bssl::MakeConstSpan(ids, num));
+ }
+ 
++void SSL_set_server_padding_request(SSL *ssl, uint16_t padding) {
++  if (!ssl->config) {
++    return;
++  }
++  ssl->config->server_padding_request = padding;
++  ssl->config->server_padding_enabled = true;
++}
++
++void SSL_set_grease_sigalgs_enabled(SSL *ssl, int enabled) {
++  if (!ssl->config) {
++    return;
++  }
++  ssl->config->grease_sigalgs_enabled = !!enabled;
++}
++
+ void SSL_set_encrypt_then_mac(SSL *ssl, int enabled) {
+   if (!ssl->config) {
+     return;

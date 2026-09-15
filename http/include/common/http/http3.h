@@ -95,6 +95,27 @@ struct Http3Settings {
      * A duration during which sender allows quiescent.
      */
     ag::Micros max_idle_timeout = DEFAULT_MAX_IDLE_TIMEOUT;
+    /**
+     * The maximum connection-level flow control window when window auto-tuning is enabled.
+     * Auto-tuning is enabled only if this is nonzero; the window starts at `initial_max_data`
+     * and scales up to this value based on the bandwidth-delay product. Zero disables it.
+     */
+    uint64_t max_window = 0;
+    /**
+     * The maximum stream-level flow control window when window auto-tuning is enabled.
+     * Auto-tuning is enabled only if this is nonzero; the window starts at the relevant
+     * `initial_max_stream_data_*` and scales up to this value based on the bandwidth-delay
+     * product. This lets a single long-lived stream that multiplexes many logical connections
+     * grow past the small initial stream window. Zero disables it.
+     */
+    uint64_t max_stream_window = 0;
+    /**
+     * The QUIC version the client offers, as one of the `NGTCP2_PROTO_VER_*` constants
+     * (e.g. `NGTCP2_PROTO_VER_V1`, `NGTCP2_PROTO_VER_V2`). This setting applies only to the
+     * client; the server always answers with the version the client chose. Zero selects the
+     * default version (`NGTCP2_PROTO_VER_V1`).
+     */
+    uint32_t quic_version = 0;
 };
 
 struct QuicNetworkPath {
@@ -129,8 +150,8 @@ protected:
 
     explicit Http3Session(const Http3Settings &settings);
 
-    Error<Http3Error> initialize_session(
-            const QuicNetworkPath &path, ag::UniquePtr<SSL, &SSL_free> ssl, ngtcp2_cid client_scid, ngtcp2_cid client_dcid);
+    Error<Http3Error> initialize_session(const QuicNetworkPath &path, ag::UniquePtr<SSL, &SSL_free> ssl,
+            ngtcp2_cid client_scid, ngtcp2_cid client_dcid, uint32_t client_chosen_version);
 
     int input_impl(const QuicNetworkPath &path, Uint8View chunk);
     Error<Http3Error> submit_trailer_impl(uint64_t stream_id, const Headers &headers);
@@ -140,6 +161,8 @@ protected:
     Error<Http3Error> consume_stream_impl(uint64_t stream_id, size_t length);
     Error<Http3Error> handle_expiry_impl();
     Error<Http3Error> flush_impl();
+
+    [[nodiscard]] size_t get_stream_send_capacity_impl(uint64_t stream_id) const;
 
     struct DataSource {
         UniquePtr<evbuffer, &evbuffer_free> buffer;
@@ -365,7 +388,8 @@ public:
      */
     Error<Http3Error> consume_connection(size_t length);
     /**
-     * Extend stream- and connection-level flow control windows.
+     * Extend stream-level flow control window. The connection-level window is extended by the session
+     * itself as soon as the data is passed to `Handler::on_body`, so it is not extended here.
      * @return Some error if failed, null otherwise.
      */
     Error<Http3Error> consume_stream(uint64_t stream_id, size_t length);
@@ -550,7 +574,8 @@ public:
      */
     Error<Http3Error> consume_connection(size_t length);
     /**
-     * Extend stream- and connection-level flow control windows.
+     * Extend stream-level flow control window. The connection-level window is extended by the session
+     * itself as soon as the data is passed to `Handler::on_body`, so it is not extended here.
      * @return Some error if failed, null otherwise.
      */
     Error<Http3Error> consume_stream(uint64_t stream_id, size_t length);
@@ -568,11 +593,38 @@ public:
      */
     Error<Http3Error> flush();
     /**
+     * Replace callback handlers of an already established session.
+     * Allows handing the session over to a different context (e.g. from a
+     * probing phase to the operational phase) without re-establishing the
+     * QUIC connection. All subsequent events will be delivered to the new
+     * handlers.
+     * @param handler New callback handlers.
+     */
+    void update_callbacks(const Callbacks &handler);
+    /**
      * Get the period for which the session should be kept alive before deletion.
      * It is supposed to be called after receiving the `Callbacks::on_close` event
      * or an error from the `input()` method.
      */
     [[nodiscard]] Nanos probe_timeout() const;
+    /**
+     * Get QUIC connection statistics.
+     * @return ngtcp2_conn_info with connection-level statistics.
+     */
+    [[nodiscard]] ngtcp2_conn_info get_stats() const;
+    /**
+     * Get the non-owning SSL pointer for use in kex_group_nid() and SSL_session_reused logging.
+     * @return raw SSL* owned by this client.
+     */
+    [[nodiscard]] SSL *get_ssl() const;
+    /**
+     * Get the number of bytes that can be submitted to the given stream right now
+     * without violating the current QUIC flow-control window (both stream- and
+     * connection-level), accounting for data already buffered but not yet sent.
+     * Use it to apply backpressure to producers feeding the stream.
+     * @return remaining send capacity in bytes, or 0 if the stream does not exist.
+     */
+    [[nodiscard]] size_t get_stream_send_capacity(uint64_t stream_id) const;
 
 private:
     friend class Http3Session<Http3Client>;
