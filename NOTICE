@@ -1,0 +1,37 @@
+NativeLibsCommon
+
+Copyright (c) AdGuard Software Ltd.
+
+This product includes software developed by AdGuard Software Ltd.
+(https://github.com/AdguardTeam/NativeLibsCommon), licensed under the
+Apache License, Version 2.0. A copy of the license is provided in
+LICENSE.md.
+
+--------------------------------------------------------------------------
+Modifications
+--------------------------------------------------------------------------
+
+In accordance with Section 4(b) of the Apache License, Version 2.0, this
+notice states that the following files were modified or added, relative to
+upstream NativeLibsCommon v8.1.33, by Roman Kovalchuk in 2025 and 2026.
+
+ldns Conan recipe:
+  conan/recipes/ldns/conanfile.py             - modified
+  conan/recipes/ldns/CMakeLists.txt           - modified
+  conan/recipes/ldns/windows.patch            - modified
+  conan/recipes/ldns/edns-codes.patch         - added
+  conan/recipes/ldns/compat/ldns/common.h     - modified
+  conan/recipes/ldns/compat/ldns/net.h        - modified
+  conan/recipes/ldns/compat/ldns/util.h       - modified
+
+Build configuration:
+  conanfile.py                                - modified
+  cmake/conan_bootstrap.cmake                 - modified
+
+Summary of changes: the bundled ldns dependency was updated and repackaged,
+with an added patch introducing extended DNS response codes, adjusted symbol
+visibility for two functions, and compatibility header and Windows build
+fixes.
+
+The modifications above are licensed under the Apache License, Version 2.0,
+the same terms as the original work.

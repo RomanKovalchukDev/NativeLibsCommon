@@ -20,7 +20,7 @@ class LdnsConan(ConanFile):
         self.run("git clone https://github.com/NLnetLabs/ldns.git")
         self.run("cd ldns && git checkout 0038f8e5d2f73dbfd6ec657ec6ea52f08bc90ebf")
         patch(self, base_path="ldns", patch_file="windows.patch")
-        patch(self, base_path="ldns", patch_file="cira-codes.patch")
+        patch(self, base_path="ldns", patch_file="edns-codes.patch")
 
     def layout(self):
         cmake_layout(self)
